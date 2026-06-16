@@ -286,13 +286,18 @@ class DeviceManager: ObservableObject {
                 return
             }
 
+            let timeSinceLastAttempt = Date().timeIntervalSince(self.lastHeartbeatAttemptStartedAt)
             let connectingIsStale =
                 self.connectionStatus == "Connecting..."
-                && Date().timeIntervalSince(self.lastHeartbeatAttemptStartedAt) >= self.staleHeartbeatAttemptInterval
+                && timeSinceLastAttempt >= self.staleHeartbeatAttemptInterval
 
             guard self.connectionStatus != "Connecting..." || connectingIsStale else {
                 self.logOnce("[DeviceManager] Auto-reconnect skipped: already connecting", key: "auto_reconnect")
                 return
+            }
+
+            if self.connectionStatus != "Connecting..." {
+                guard timeSinceLastAttempt >= 10.0 else { return }
             }
 
             if connectingIsStale {
@@ -518,8 +523,14 @@ class DeviceManager: ObservableObject {
             }
         }
 
-        guard tunnelErr == IdeviceSuccess, rpAdapter != nil, rpHandshake != nil else {
-            self.logOnce("[DeviceManager] ERROR: RPPairing tunnel failed. Err: \(String(describing: tunnelErr))", key: "connection_status")
+        guard tunnelErr == nil, rpAdapter != nil, rpHandshake != nil else {
+            if let err = tunnelErr {
+                let msg = err.pointee.message != nil ? String(cString: err.pointee.message!) : "No message"
+                self.logOnce("[DeviceManager] ERROR: RPPairing tunnel failed. Code: \(err.pointee.code), SubCode: \(err.pointee.sub_code), Msg: \(msg)", key: "connection_status")
+                idevice_error_free(err)
+            } else {
+                self.logOnce("[DeviceManager] ERROR: RPPairing tunnel failed (nil error pointer but adapter/handshake nil)", key: "connection_status")
+            }
             resetConnectionHandles()
             return false
         }
