@@ -541,6 +541,20 @@ class DeviceManager: ObservableObject {
 
     
     func startHeartbeat(forceReconnect: Bool = false, completion: ((Bool) -> Void)? = nil) {
+        if !forceReconnect {
+            if connectionStatus == "Connecting..." {
+                completion?(false)
+                return
+            }
+            let timeSinceLastAttempt = Date().timeIntervalSince(lastHeartbeatAttemptStartedAt)
+            if connectionStatus != "Connecting..." && !heartbeatReady {
+                guard timeSinceLastAttempt >= 10.0 else {
+                    completion?(false)
+                    return
+                }
+            }
+        }
+
         heartbeatSessionID &+= 1
         refreshExpectedPairingFileState()
         guard hasValidExpectedPairingFile else {
