@@ -4536,55 +4536,66 @@ class DeviceManager: ObservableObject {
         
         DispatchQueue.global(qos: .userInitiated).async {
             var afc: AfcClientHandle?
+            self.connectAfcClient(&afc)
+
+            guard afc != nil else {
+                Logger.shared.log("[DeviceManager] ERROR: AFC client is nil for download")
+                completion(nil)
+                return
+            }
+            
+            defer {
+                if let currentAfc = afc {
+                    afc_client_free(currentAfc)
+                }
+            }
 
             for attempt in 1...2 {
                 var file: AfcFileHandle?
-                self.connectAfcClient(&afc)
+                let err = afc_file_open(afc, remotePath, AfcRdOnly, &file)
 
-                if afc == nil {
-                    Logger.shared.log("[DeviceManager] ERROR: AFC client is nil for download")
-                    guard attempt < 2, self.ensureActiveTransport(reason: "download \(remotePath)") else {
+                if err == nil, let fileHandle = file {
+                    var dataPtr: UnsafeMutablePointer<UInt8>? = nil
+                    var length: Int = 0
+                    let readErr = afc_file_read_entire(fileHandle, &dataPtr, &length)
+                    afc_file_close(fileHandle)
+
+                    if let readErr {
+                        let msg = readErr.pointee.message != nil ? String(cString: readErr.pointee.message!) : "No message"
+                        Logger.shared.log("[DeviceManager] ERROR: afc_file_read_entire failed. Code: \(readErr.pointee.code), Msg: \(msg)")
+                        idevice_error_free(readErr)
                         completion(nil)
                         return
                     }
-                    continue
-                }
 
-                afc_file_open(afc, remotePath, AfcRdOnly, &file)
-
-                guard file != nil else {
-                    if attempt < 2, self.reconnectAfcClient(&afc, reason: remotePath) {
-                        continue
+                    if let ptr = dataPtr, length > 0 {
+                        let data = Data(bytes: ptr, count: length)
+                        Logger.shared.log("[DeviceManager] Downloaded \(length) bytes from \(remotePath)")
+                        afc_file_read_data_free(ptr, length)
+                        completion(data)
+                        return
                     }
 
-                    Logger.shared.log("[DeviceManager] File does not exist or cannot be opened: \(remotePath)")
-                    afc_client_free(afc)
                     completion(nil)
                     return
                 }
 
-                var dataPtr: UnsafeMutablePointer<UInt8>? = nil
-                var length: Int = 0
+                // If we got here, afc_file_open failed.
+                if let openErr = err {
+                    let msg = openErr.pointee.message != nil ? String(cString: openErr.pointee.message!) : "No message"
+                    let isConnLoss = self.isConnectionLossError(openErr)
+                    Logger.shared.log("[DeviceManager] afc_file_open failed. Code: \(openErr.pointee.code), Msg: \(msg), ConnectionLoss: \(isConnLoss)")
+                    idevice_error_free(openErr)
 
-                let err = afc_file_read_entire(file, &dataPtr, &length)
-
-                if err == nil, let dataPtr = dataPtr, length > 0 {
-                    let data = Data(bytes: dataPtr, count: length)
-                    Logger.shared.log("[DeviceManager] Downloaded \(length) bytes from \(remotePath)")
-                    afc_file_read_data_free(dataPtr, length)
-                    afc_file_close(file)
-                    afc_client_free(afc)
-                    completion(data)
-                    return
+                    if isConnLoss && attempt < 2 {
+                        if self.reconnectAfcClient(&afc, reason: remotePath) {
+                            continue
+                        }
+                    }
+                } else {
+                    Logger.shared.log("[DeviceManager] afc_file_open failed with nil error and nil file handle")
                 }
 
-                afc_file_close(file)
-                if attempt < 2, self.reconnectAfcClient(&afc, reason: remotePath) {
-                    continue
-                }
-
-                Logger.shared.log("[DeviceManager] Failed to read file: \(remotePath)")
-                afc_client_free(afc)
                 completion(nil)
                 return
             }
@@ -4623,7 +4634,7 @@ class DeviceManager: ObservableObject {
         let semaphore = DispatchSemaphore(value: 0)
         var reconnected = false
 
-        startHeartbeat { success in
+        startHeartbeat(forceReconnect: true) { success in
             reconnected = success
             semaphore.signal()
         }
@@ -4641,6 +4652,30 @@ class DeviceManager: ObservableObject {
         }
 
         Logger.shared.log("[DeviceManager] AFC client reconnected successfully")
+        return true
+    }
+
+    private func isConnectionLossError(_ err: IdeviceErrorCode) -> Bool {
+        guard let error = err else { return false }
+        let code = error.pointee.code
+        let msg = error.pointee.message != nil ? String(cString: error.pointee.message!) : ""
+        
+        // AFC_E_OBJECT_NOT_FOUND is 8. AFC_E_OBJECT_EXISTS is 9.
+        if code == 8 || code == 9 {
+            return false
+        }
+        
+        // Other filesystem or permission errors:
+        // AFC_E_INVALID_ARGUMENT (7), AFC_E_OBJECT_IS_DIR (10), AFC_E_PERM_DENIED (11).
+        if code == 7 || code == 10 || code == 11 {
+            return false
+        }
+        
+        let lower = msg.lowercased()
+        if lower.contains("not found") || lower.contains("no such") || lower.contains("objectnotfound") {
+            return false
+        }
+        
         return true
     }
 
@@ -4730,7 +4765,10 @@ class DeviceManager: ObservableObject {
             } else {
                 currentPath += "/\(component)"
             }
-            afc_make_directory(afc, currentPath)
+            let makeErr = afc_make_directory(afc, currentPath)
+            if let makeErr {
+                idevice_error_free(makeErr)
+            }
         }
     }
 
@@ -4744,16 +4782,27 @@ class DeviceManager: ObservableObject {
 
         let parentDir = (remotePath as NSString).deletingLastPathComponent
         ensureRemoteDirectoryExists(parentDir, afc: afc)
-        afc_remove_path(afc, remotePath)
-        afc_file_open(afc, remotePath, AfcWrOnly, &file)
+        
+        let removeErr = afc_remove_path(afc, remotePath)
+        if let removeErr {
+            idevice_error_free(removeErr)
+        }
+        
+        let openErr = afc_file_open(afc, remotePath, AfcWrOnly, &file)
 
-        guard file != nil else {
-            Logger.shared.log("[DeviceManager] ERROR: Could not open remote file: \(remotePath)")
+        guard openErr == nil, let fileHandle = file else {
+            if let openErr {
+                let msg = openErr.pointee.message != nil ? String(cString: openErr.pointee.message!) : "No message"
+                Logger.shared.log("[DeviceManager] ERROR: Could not open remote file for upload: \(remotePath). Code: \(openErr.pointee.code), Msg: \(msg)")
+                idevice_error_free(openErr)
+            } else {
+                Logger.shared.log("[DeviceManager] ERROR: Could not open remote file for upload: \(remotePath) (nil error and nil file handle)")
+            }
             return false
         }
 
         guard !data.isEmpty else {
-            afc_file_close(file)
+            afc_file_close(fileHandle)
             Logger.shared.log("[DeviceManager] ERROR: Refusing to upload empty file: \(remotePath)")
             return false
         }
@@ -4762,13 +4811,19 @@ class DeviceManager: ObservableObject {
             guard let base = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return nil
             }
-            return afc_file_write(file, base, data.count)
+            return afc_file_write(fileHandle, base, data.count)
         }
 
-        afc_file_close(file)
+        afc_file_close(fileHandle)
 
         guard writeErr == nil else {
-            Logger.shared.log("[DeviceManager] ERROR: Failed to write remote file: \(remotePath)")
+            if let writeErr {
+                let msg = writeErr.pointee.message != nil ? String(cString: writeErr.pointee.message!) : "No message"
+                Logger.shared.log("[DeviceManager] ERROR: Failed to write remote file: \(remotePath). Code: \(writeErr.pointee.code), Msg: \(msg)")
+                idevice_error_free(writeErr)
+            } else {
+                Logger.shared.log("[DeviceManager] ERROR: Failed to write remote file: \(remotePath)")
+            }
             return false
         }
 
@@ -4777,14 +4832,18 @@ class DeviceManager: ObservableObject {
         var checkFile: AfcFileHandle?
         let ret = afc_file_open(afc, remotePath, AfcRdOnly, &checkFile)
         if ret == nil {
-            if checkFile != nil {
-                afc_file_close(checkFile)
+            if let checkFileHandle = checkFile {
+                afc_file_close(checkFileHandle)
             }
             return true
+        } else {
+            if let ret {
+                let msg = ret.pointee.message != nil ? String(cString: ret.pointee.message!) : "No message"
+                Logger.shared.log("[DeviceManager] ERROR: Verification open failed for \(remotePath). Code: \(ret.pointee.code), Msg: \(msg)")
+                idevice_error_free(ret)
+            }
+            return false
         }
-
-        Logger.shared.log("[DeviceManager] ERROR: Verification failed for \(remotePath)")
-        return false
     }
     
     
@@ -4794,48 +4853,58 @@ class DeviceManager: ObservableObject {
         
         DispatchQueue.global(qos: .userInitiated).async {
             var afc: AfcClientHandle?
-            for attempt in 1...2 {
-                self.connectAfcClient(&afc)
-                
-                if afc == nil {
-                    Logger.shared.log("[DeviceManager] ERROR: AFC client is nil for listFiles")
-                    guard attempt < 2, self.ensureActiveTransport(reason: "list files \(remotePath)") else {
-                        completion(nil)
-                        return
-                    }
-                    continue
+            self.connectAfcClient(&afc)
+
+            guard afc != nil else {
+                Logger.shared.log("[DeviceManager] ERROR: AFC client is nil for listFiles")
+                completion(nil)
+                return
+            }
+            
+            defer {
+                if let currentAfc = afc {
+                    afc_client_free(currentAfc)
                 }
-                
+            }
+
+            for attempt in 1...2 {
                 var entries: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
                 var count: Int = 0
                 
                 let err = afc_list_directory(afc, remotePath, &entries, &count)
                 
-                var files: [String] = []
-                
-                if err == nil, let list = entries {
-                    for i in 0..<count {
-                        if let ptr = list[i] {
-                            let name = String(cString: ptr)
-                            if name != "." && name != ".." {
-                                files.append(name)
+                if err == nil {
+                    var files: [String] = []
+                    if let list = entries {
+                        for i in 0..<count {
+                            if let ptr = list[i] {
+                                let name = String(cString: ptr)
+                                if name != "." && name != ".." {
+                                    files.append(name)
+                                }
                             }
                         }
+                        free(entries)
                     }
-                    
-                    free(entries)
-                    afc_client_free(afc)
                     completion(files)
                     return
                 }
 
-                if attempt < 2, self.reconnectAfcClient(&afc, reason: remotePath) {
-                    continue
+                // If we got here, afc_list_directory failed.
+                if let listErr = err {
+                    let msg = listErr.pointee.message != nil ? String(cString: listErr.pointee.message!) : "No message"
+                    let isConnLoss = self.isConnectionLossError(listErr)
+                    Logger.shared.log("[DeviceManager] afc_list_directory failed. Code: \(listErr.pointee.code), Msg: \(msg), ConnectionLoss: \(isConnLoss)")
+                    idevice_error_free(listErr)
+
+                    if isConnLoss && attempt < 2 {
+                        if self.reconnectAfcClient(&afc, reason: remotePath) {
+                            continue
+                        }
+                    }
                 }
 
-                Logger.shared.log("[DeviceManager] Error reading directory or empty: \(remotePath)")
-                afc_client_free(afc)
-                completion(files)
+                completion(nil)
                 return
             }
         }
