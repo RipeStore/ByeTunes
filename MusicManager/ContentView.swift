@@ -231,8 +231,11 @@ struct ContentView: View {
             handleIncomingFile(url)
         }
         .onChange(of: scenePhase) { newPhase in
-            guard newPhase == .active else { return }
-            attemptAutoReconnectIfNeeded()
+            if newPhase == .active {
+                attemptAutoReconnectIfNeeded()
+            } else {
+                manager.stopHeartbeat()
+            }
         }
         .onChange(of: songsPersistenceSignature) { _ in
             persistSongQueue(songs)

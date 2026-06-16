@@ -622,6 +622,15 @@ class DeviceManager: ObservableObject {
         }
     }
 
+    func stopHeartbeat() {
+        heartbeatSessionID &+= 1
+        resetConnectionHandles()
+        DispatchQueue.main.async {
+            self.connectionStatus = "Disconnected"
+            self.heartbeatReady = false
+        }
+    }
+
     func establishHeartbeat(_ completion: @escaping (Bool) -> Void) {
         let sessionID = heartbeatSessionID
         self.logOnce("[DeviceManager] Establishing \(connectionModeDescription) connection...", key: "connection_status")
