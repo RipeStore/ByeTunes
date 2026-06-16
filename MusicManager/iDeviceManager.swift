@@ -345,7 +345,6 @@ class DeviceManager: ObservableObject {
 
     
     private func resetConnectionHandles() {
-        heartbeatSessionID &+= 1
         if let oldProvider = provider {
             idevice_provider_free(oldProvider)
             provider = nil
@@ -531,6 +530,7 @@ class DeviceManager: ObservableObject {
 
     
     func startHeartbeat(forceReconnect: Bool = false, completion: ((Bool) -> Void)? = nil) {
+        heartbeatSessionID &+= 1
         refreshExpectedPairingFileState()
         guard hasValidExpectedPairingFile else {
             let message = "Invalid \(expectedPairingFileTitle)"
@@ -598,7 +598,6 @@ class DeviceManager: ObservableObject {
     }
 
     func establishHeartbeat(_ completion: @escaping (Bool) -> Void) {
-        resetConnectionHandles()
         let sessionID = heartbeatSessionID
         self.logOnce("[DeviceManager] Establishing \(connectionModeDescription) connection...", key: "connection_status")
 

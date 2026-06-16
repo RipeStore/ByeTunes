@@ -31,7 +31,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "BB302E192F0D69FD00BB151F"
-               BuildableName = "MusicManager.app"
+               BuildableName = "ByeTunes.app"
                BlueprintName = "MusicManager"
                ReferencedContainer = "container:MusicManager.xcodeproj">
             </BuildableReference>
@@ -62,7 +62,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "BB302E192F0D69FD00BB151F"
-            BuildableName = "MusicManager.app"
+            BuildableName = "ByeTunes.app"
             BlueprintName = "MusicManager"
             ReferencedContainer = "container:MusicManager.xcodeproj">
          </BuildableReference>
@@ -81,7 +81,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "BB302E192F0D69FD00BB151F"
-            BuildableName = "MusicManager.app"
+            BuildableName = "ByeTunes.app"
             BlueprintName = "MusicManager"
             ReferencedContainer = "container:MusicManager.xcodeproj">
          </BuildableReference>
