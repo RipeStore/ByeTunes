@@ -1152,12 +1152,12 @@ class DeviceManager: ObservableObject {
         }
     }
     
-    func createDatabaseSnapshot(progress: SnapshotProgressHandler? = nil, completion: @escaping (Bool, String) -> Void) {
+    func createDatabaseSnapshot(forceDbOnly: Bool = false, progress: SnapshotProgressHandler? = nil, completion: @escaping (Bool, String) -> Void) {
         Logger.shared.log("[Backup] Creating database snapshot...")
         
         DispatchQueue.global(qos: .userInitiated).async {
             progress?("Preparing backup...", nil)
-            let fullBackupEnabled = UserDefaults.standard.bool(forKey: "fullBackupSnapshots")
+            let fullBackupEnabled = forceDbOnly ? false : UserDefaults.standard.bool(forKey: "fullBackupSnapshots")
             if self.killMusicBeforeInjectEnabled {
                 let killed = self.terminateMusicAppIfRunning()
                 Logger.shared.log("[Backup] Pre-snapshot Music kill \(killed ? "completed" : "skipped/failed")")
@@ -1346,6 +1346,357 @@ class DeviceManager: ObservableObject {
                 completion(false, "Delete failed")
             }
         }
+    }
+    
+    func runDatabaseRepairDoctor(progress: @escaping (String, Double?) -> Void, completion: @escaping (Bool, String) -> Void) {
+        progress("Connecting to device...", 0.05)
+        startHeartbeat(forceReconnect: true) { success in
+            guard success else {
+                completion(false, "Connection failed. Please check pairing file.")
+                return
+            }
+            
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.executeDatabaseRepairDoctor(progress: progress, completion: completion)
+            }
+        }
+    }
+    
+    private func executeDatabaseRepairDoctor(progress: @escaping (String, Double?) -> Void, completion: @escaping (Bool, String) -> Void) {
+        progress("Creating database backup...", 0.1)
+        
+        let backupSem = DispatchSemaphore(value: 0)
+        var backupMsg = ""
+        var backupSuccess = false
+        self.createDatabaseSnapshot(forceDbOnly: true, progress: { status, prog in
+            progress("Backup: \(status)", prog != nil ? 0.1 + (prog! * 0.1) : nil)
+        }) { ok, msg in
+            backupSuccess = ok
+            backupMsg = msg
+            backupSem.signal()
+        }
+        backupSem.wait()
+        
+        guard backupSuccess else {
+            completion(false, "Backup failed: \(backupMsg). Aborting repair for safety.")
+            return
+        }
+        
+        progress("Downloading library database...", 0.25)
+        var dbData: Data?
+        var walData: Data?
+        var shmData: Data?
+        
+        let semDownload = DispatchSemaphore(value: 0)
+        self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb") { data in
+            dbData = data
+            semDownload.signal()
+        }
+        semDownload.wait()
+        
+        let semWal = DispatchSemaphore(value: 0)
+        self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal") { data in
+            walData = data
+            semWal.signal()
+        }
+        semWal.wait()
+        
+        let semShm = DispatchSemaphore(value: 0)
+        self.downloadFileFromDevice(remotePath: "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm") { data in
+            shmData = data
+            semShm.signal()
+        }
+        semShm.wait()
+        
+        guard let databaseData = dbData else {
+            completion(false, "Failed to download MediaLibrary.sqlitedb from device.")
+            return
+        }
+        
+        progress("Analyzing music library index...", 0.35)
+        var dbFilenames = Set<String>()
+        var dbArtworkPaths = Set<String>()
+        var dbArtworkTokens = Set<String>()
+        var itemLocations: [Int64: String] = [:]
+        var artworkPathsByToken: [String: String] = [:]
+        
+        let querySuccess = self.withStagedMediaLibrary(dbData: databaseData, walData: walData, shmData: shmData, label: "repair_doctor_query") { localDBURL -> Bool in
+            var db: OpaquePointer?
+            guard sqlite3_open(localDBURL.path, &db) == SQLITE_OK else {
+                if db != nil { sqlite3_close(db) }
+                return false
+            }
+            defer { sqlite3_close(db) }
+            
+            var errorMsg: UnsafeMutablePointer<CChar>?
+            sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, &errorMsg)
+            if let msg = errorMsg {
+                sqlite3_free(errorMsg)
+            }
+            
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT item_pid, location FROM item_extra WHERE location != ''", -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    let pid = sqlite3_column_int64(stmt, 0)
+                    if let ptr = sqlite3_column_text(stmt, 1) {
+                        let loc = String(cString: ptr)
+                        itemLocations[pid] = loc
+                        let filename = (loc as NSString).lastPathComponent
+                        dbFilenames.insert(filename)
+                    }
+                }
+            }
+            if stmt != nil { sqlite3_finalize(stmt) }
+            
+            if sqlite3_prepare_v2(db, "SELECT artwork_token, relative_path FROM artwork WHERE relative_path != ''", -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    if let tokenPtr = sqlite3_column_text(stmt, 0), let pathPtr = sqlite3_column_text(stmt, 1) {
+                        let token = String(cString: tokenPtr)
+                        let path = String(cString: pathPtr)
+                        artworkPathsByToken[token] = path
+                        dbArtworkPaths.insert(path)
+                        dbArtworkTokens.insert(token)
+                    }
+                }
+            }
+            if stmt != nil { sqlite3_finalize(stmt) }
+            
+            return true
+        }
+        
+        guard querySuccess == true else {
+            completion(false, "Failed to parse database records.")
+            return
+        }
+        
+        progress("Scanning device folders...", 0.5)
+        var afc: AfcClientHandle?
+        self.connectAfcClient(&afc)
+        guard afc != nil else {
+            completion(false, "Failed to establish AFC filesystem session.")
+            return
+        }
+        defer {
+            if let a = afc {
+                afc_client_free(a)
+            }
+        }
+        
+        var deviceAudioFiles: [String: String] = [:]
+        var subfolders: [String] = []
+        var entries: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+        var count = 0
+        
+        if afc_list_directory(afc, "/iTunes_Control/Music", &entries, &count) == nil, let list = entries {
+            for i in 0..<count {
+                if let ptr = list[i] {
+                    let name = String(cString: ptr)
+                    if name != "." && name != ".." && name.hasPrefix("F") {
+                        subfolders.append("/iTunes_Control/Music/\(name)")
+                    }
+                }
+            }
+            free(entries)
+        }
+        
+        if subfolders.isEmpty {
+            subfolders.append(self.resolvePrimaryMusicDirectory())
+        }
+        
+        for folder in subfolders {
+            var fEntries: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+            var fCount = 0
+            if afc_list_directory(afc, folder, &fEntries, &fCount) == nil, let list = fEntries {
+                for i in 0..<fCount {
+                    if let ptr = list[i] {
+                        let file = String(cString: ptr)
+                        if file != "." && file != ".." && file != ".DS_Store" {
+                            deviceAudioFiles[file] = "\(folder)/\(file)"
+                        }
+                    }
+                }
+                free(fEntries)
+            }
+        }
+        
+        var deviceArtworkFiles: [String: String] = [:]
+        var artworkSubfolders: [String] = []
+        var artEntries: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+        var artCount = 0
+        
+        if afc_list_directory(afc, "/iTunes_Control/iTunes/Artwork/Originals", &artEntries, &artCount) == nil, let list = artEntries {
+            for i in 0..<artCount {
+                if let ptr = list[i] {
+                    let name = String(cString: ptr)
+                    if name != "." && name != ".." && name.count == 2 {
+                        artworkSubfolders.append(name)
+                    }
+                }
+            }
+            free(artEntries)
+        }
+        
+        for sub in artworkSubfolders {
+            let artFolder = "/iTunes_Control/iTunes/Artwork/Originals/\(sub)"
+            var subEntries: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+            var subCount = 0
+            if afc_list_directory(afc, artFolder, &subEntries, &subCount) == nil, let list = subEntries {
+                for i in 0..<subCount {
+                    if let ptr = list[i] {
+                        let file = String(cString: ptr)
+                        if file != "." && file != ".." {
+                            let rel = "\(sub)/\(file)"
+                            deviceArtworkFiles[rel] = "\(artFolder)/\(file)"
+                        }
+                    }
+                }
+                free(subEntries)
+            }
+        }
+        
+        progress("Finding mismatched files...", 0.65)
+        var orphanedAudioPaths: [String] = []
+        for (filename, fullPath) in deviceAudioFiles {
+            if !dbFilenames.contains(filename) {
+                orphanedAudioPaths.append(fullPath)
+            }
+        }
+        
+        var ghostItemPids: [Int64] = []
+        for (pid, location) in itemLocations {
+            let filename = (location as NSString).lastPathComponent
+            if !filename.isEmpty && deviceAudioFiles[filename] == nil {
+                ghostItemPids.append(pid)
+            }
+        }
+        
+        var orphanedArtworkPaths: [String] = []
+        for (relPath, fullPath) in deviceArtworkFiles {
+            if !dbArtworkPaths.contains(relPath) {
+                orphanedArtworkPaths.append(fullPath)
+            }
+        }
+        
+        var invalidArtworkTokens: [String] = []
+        for (token, relPath) in artworkPathsByToken {
+            if deviceArtworkFiles[relPath] == nil {
+                invalidArtworkTokens.append(token)
+            }
+        }
+        
+        progress("Cleaning orphaned storage...", 0.75)
+        var deletedOrphanAudio = 0
+        for path in orphanedAudioPaths {
+            let err = afc_remove_path(afc, path)
+            if err == nil { deletedOrphanAudio += 1 }
+            else { idevice_error_free(err) }
+        }
+        
+        var deletedOrphanArtwork = 0
+        for path in orphanedArtworkPaths {
+            let err = afc_remove_path(afc, path)
+            if err == nil { deletedOrphanArtwork += 1 }
+            else { idevice_error_free(err) }
+        }
+        
+        progress("Cleaning database records...", 0.85)
+        var repairedDBData: Data? = nil
+        let repairResult = self.withStagedMediaLibrary(dbData: databaseData, walData: walData, shmData: shmData, label: "repair_doctor_write") { localDBURL -> Bool in
+            var db: OpaquePointer?
+            guard sqlite3_open(localDBURL.path, &db) == SQLITE_OK else {
+                if db != nil { sqlite3_close(db) }
+                return false
+            }
+            defer {
+                if db != nil { sqlite3_close(db) }
+            }
+            
+            func executeLocalSQL(_ sql: String) {
+                var errMsg: UnsafeMutablePointer<CChar>?
+                if sqlite3_exec(db, sql, nil, nil, &errMsg) != SQLITE_OK {
+                    let error = errMsg.map { String(cString: $0) } ?? "Unknown error"
+                    sqlite3_free(errMsg)
+                    Logger.shared.log("[Doctor] SQL Error: \(error) for: \(sql)")
+                }
+            }
+            
+            for pid in ghostItemPids {
+                Logger.shared.log("[Doctor] DB Delete: Ghost PID \(pid)")
+                executeLocalSQL("DELETE FROM item WHERE item_pid = \(pid)")
+                executeLocalSQL("DELETE FROM item_extra WHERE item_pid = \(pid)")
+                executeLocalSQL("DELETE FROM item_playback WHERE item_pid = \(pid)")
+                executeLocalSQL("DELETE FROM item_stats WHERE item_pid = \(pid)")
+                executeLocalSQL("DELETE FROM item_store WHERE item_pid = \(pid)")
+                executeLocalSQL("DELETE FROM item_search WHERE item_pid = \(pid)")
+                executeLocalSQL("DELETE FROM lyrics WHERE item_pid = \(pid)")
+                executeLocalSQL("DELETE FROM chapter WHERE item_pid = \(pid)")
+                executeLocalSQL("DELETE FROM item_video WHERE item_pid = \(pid)")
+            }
+            
+            for token in invalidArtworkTokens {
+                Logger.shared.log("[Doctor] DB Delete: Invalid Artwork Token \(token)")
+                executeLocalSQL("DELETE FROM artwork WHERE artwork_token = '\(token)'")
+                executeLocalSQL("DELETE FROM artwork_token WHERE artwork_token = '\(token)'")
+            }
+            
+            var errorMsg: UnsafeMutablePointer<CChar>?
+            sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", nil, nil, &errorMsg)
+            if let msg = errorMsg {
+                sqlite3_free(errorMsg)
+            }
+            sqlite3_exec(db, "PRAGMA journal_mode=DELETE", nil, nil, nil)
+            
+            sqlite3_close(db)
+            db = nil
+            
+            repairedDBData = try? Data(contentsOf: localDBURL)
+            return repairedDBData != nil
+        }
+        
+        guard repairResult == true, let repairedData = repairedDBData else {
+            completion(false, "Failed to compile repaired database.")
+            return
+        }
+        
+        progress("Staging database update...", 0.9)
+        let localTempURL = FileManager.default.temporaryDirectory.appendingPathComponent("repairedMediaLibrary.sqlitedb")
+        try? FileManager.default.removeItem(at: localTempURL)
+        do {
+            try repairedData.write(to: localTempURL)
+        } catch {
+            completion(false, "Failed to write local database copy.")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: localTempURL) }
+        
+        let tempDBPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb.temp"
+        let finalDBPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb"
+        let shmPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-shm"
+        let walPath = "/iTunes_Control/iTunes/MediaLibrary.sqlitedb-wal"
+        
+        let dbUploadSuccess = self.uploadFileToDeviceWithReconnect(localURL: localTempURL, remotePath: tempDBPath, afc: &afc)
+        guard dbUploadSuccess else {
+            completion(false, "Failed to upload staged database.")
+            return
+        }
+        
+        guard let finalAfc = afc, self.replaceRemoteMediaLibrary(
+            tempDBPath: tempDBPath,
+            finalDBPath: finalDBPath,
+            shmPath: shmPath,
+            walPath: walPath,
+            afc: finalAfc,
+            logContext: "[Doctor]"
+        ) else {
+            completion(false, "Failed to swap database on device.")
+            return
+        }
+        
+        progress("Swapping databases...", 0.95)
+        self.sendSyncFinishedNotification()
+        
+        let summary = "Cleaned up \(deletedOrphanAudio) orphaned audio files, \(deletedOrphanArtwork) orphaned cover arts, \(ghostItemPids.count) ghost songs, and \(invalidArtworkTokens.count) broken artwork entries."
+        completion(true, summary)
     }
     
     private func restoreSnapshotDirectory(_ snapshotDir: URL, progress: SnapshotProgressHandler? = nil, completion: @escaping (Bool, String) -> Void) {
@@ -4702,7 +5053,7 @@ class DeviceManager: ObservableObject {
         return connected
     }
 
-    private func uploadFileToDeviceWithReconnect(localURL: URL, remotePath: String, afc: inout AfcClientHandle?, verify: Bool = true, maxAttempts: Int = 2) -> Bool {
+    private func uploadFileToDeviceWithReconnect(localURL: URL, remotePath: String, afc: inout AfcClientHandle?, verify: Bool = true, maxAttempts: Int = 3) -> Bool {
         for attempt in 1...maxAttempts {
             if uploadFileToDevice(localURL: localURL, remotePath: remotePath, afc: afc, verify: verify) {
                 return true
@@ -4711,13 +5062,14 @@ class DeviceManager: ObservableObject {
             guard attempt < maxAttempts else { break }
 
             Logger.shared.log("[DeviceManager] Retrying file upload after AFC reconnect (\(attempt)/\(maxAttempts - 1)): \(remotePath)")
+            Thread.sleep(forTimeInterval: 0.5)
             guard reconnectAfcClient(&afc, reason: remotePath) else { break }
         }
 
         return false
     }
 
-    private func uploadDataToDeviceWithReconnect(_ data: Data, remotePath: String, afc: inout AfcClientHandle?, verify: Bool = true, maxAttempts: Int = 2) -> Bool {
+    private func uploadDataToDeviceWithReconnect(_ data: Data, remotePath: String, afc: inout AfcClientHandle?, verify: Bool = true, maxAttempts: Int = 3) -> Bool {
         for attempt in 1...maxAttempts {
             if uploadDataToDevice(data, remotePath: remotePath, afc: afc, verify: verify) {
                 return true
@@ -4726,6 +5078,7 @@ class DeviceManager: ObservableObject {
             guard attempt < maxAttempts else { break }
 
             Logger.shared.log("[DeviceManager] Retrying data upload after AFC reconnect (\(attempt)/\(maxAttempts - 1)): \(remotePath)")
+            Thread.sleep(forTimeInterval: 0.5)
             guard reconnectAfcClient(&afc, reason: remotePath) else { break }
         }
 
@@ -5051,6 +5404,7 @@ class DeviceManager: ObservableObject {
             var dbURL: URL
             var existingFiles = Set<String>()
             var artworkInfo: [MediaLibraryBuilder.ArtworkInfo] = []
+            var songPids: [Int64] = []
             
             do {
                 
@@ -5070,6 +5424,7 @@ class DeviceManager: ObservableObject {
                     dbURL = result.dbURL
                     existingFiles = result.existingFiles
                     artworkInfo = result.artworkInfo
+                    songPids = result.pids
                     
                     Logger.shared.log("[DeviceManager] Existing files on device: \(existingFiles.count), artwork entries: \(artworkInfo.count)")
                 } else {
@@ -5083,6 +5438,7 @@ class DeviceManager: ObservableObject {
                     let createResult = try MediaLibraryBuilder.createDatabase(songs: validSongs, version: version)
                     dbURL = createResult.dbURL
                     artworkInfo = createResult.artworkInfo
+                    songPids = createResult.pids
                 }
             } catch {
                 
@@ -5170,14 +5526,20 @@ class DeviceManager: ObservableObject {
                 }
             }
 
-            // Artwork uploads — sequential, keyed to artworkInfo index.
+            // Artwork uploads — sequential, matched by song PID.
             // Pre-ensure the shared artwork directories once before the loop.
             self.ensureRemoteDirectoryExists("/iTunes_Control/iTunes/Artwork", afc: afc)
             self.ensureRemoteDirectoryExists("/iTunes_Control/iTunes/Artwork/Originals", afc: afc)
 
+            let artworkMap = Dictionary(uniqueKeysWithValues: artworkInfo.map { ($0.itemPid, $0) })
+
             for (originalIndex, song) in toUpload {
-                guard let artworkData = song.artworkData, originalIndex < artworkInfo.count else { continue }
-                let info = artworkInfo[originalIndex]
+                guard let artworkData = song.artworkData, originalIndex < songPids.count else { continue }
+                let songPid = songPids[originalIndex]
+                guard let info = artworkMap[songPid] else {
+                    Logger.shared.log("[DeviceManager] No artwork DB entry found for song: \(song.title)")
+                    continue
+                }
                 let artworkRelativePath = info.artworkHash
                 let folderName = artworkRelativePath.components(separatedBy: "/").first ?? "00"
                 let artworkDir = "/iTunes_Control/iTunes/Artwork/Originals/\(folderName)"

@@ -23,6 +23,7 @@ struct SettingsView: View {
     @State private var snapshotProgress: Double? = nil
     @State private var isFixingArtwork = false
     @State private var isRebuildingAlbumArtwork = false
+    @State private var isRunningRepairDoctor = false
     @State private var artworkFixMessage = "Fixing artwork..."
     @State private var artworkFixProgress: Double? = nil
     @State private var snapshots: [DeviceManager.DatabaseSnapshotInfo] = []
@@ -720,7 +721,7 @@ struct SettingsView: View {
                             .padding(.vertical, 14)
                             .padding(.horizontal, 16)
                         }
-                        .disabled(isSnapshotBusy || !manager.heartbeatReady)
+                        .disabled(isSnapshotBusy || isRunningRepairDoctor || !manager.heartbeatReady)
                         
                         Divider().padding(.leading, 56)
                         
@@ -747,7 +748,45 @@ struct SettingsView: View {
                             .padding(.vertical, 14)
                             .padding(.horizontal, 16)
                         }
-                        .disabled(isSnapshotBusy || !manager.heartbeatReady)
+                        .disabled(isSnapshotBusy || isRunningRepairDoctor || !manager.heartbeatReady)
+                        
+                        Divider().padding(.leading, 56)
+
+                        Button {
+                            runDatabaseRepairDoctor()
+                        } label: {
+                            HStack {
+                                if isRunningRepairDoctor {
+                                    ProgressView()
+                                        .frame(width: 28)
+                                } else {
+                                    Image(systemName: "heart.text.square")
+                                        .font(.body)
+                                        .foregroundColor(.primary)
+                                        .frame(width: 28)
+                                }
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(isRunningRepairDoctor ? "Cleaning & Repairing..." : "Clean & Repair Library")
+                                        .font(.body)
+                                        .foregroundColor(.primary)
+                                    Text("Finds orphaned files and cleans up invalid database tokens.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                
+                                Spacer()
+                                
+                                if !isRunningRepairDoctor {
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption)
+                                        .foregroundColor(Color(.systemGray3))
+                                }
+                            }
+                            .padding(.vertical, 14)
+                            .padding(.horizontal, 16)
+                        }
+                        .disabled(isSnapshotBusy || isRunningRepairDoctor || isFixingArtwork || isRebuildingAlbumArtwork || !manager.heartbeatReady)
                         
                         Divider().padding(.leading, 56)
                         
@@ -1062,7 +1101,7 @@ struct SettingsView: View {
 
         // ── Overlays (inside outer ZStack so they layer correctly) ──
 
-        if isFixingArtwork || isRebuildingAlbumArtwork {
+        if isFixingArtwork || isRebuildingAlbumArtwork || isRunningRepairDoctor {
             artworkFixPopup
                 .transition(.opacity.combined(with: .scale(scale: 0.97)))
         }
@@ -1097,6 +1136,7 @@ struct SettingsView: View {
         } // ← outer ZStack
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: isFixingArtwork)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: isRebuildingAlbumArtwork)
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: isRunningRepairDoctor)
         .animation(.spring(response: 0.3, dampingFraction: 0.85), value: isSnapshotBusy)
         .animation(.spring(), value: showToast)
         }
@@ -1145,13 +1185,13 @@ struct SettingsView: View {
                         .fill(Color.accentColor.opacity(0.12))
                         .frame(width: 58, height: 58)
 
-                    Image(systemName: isExperimentalArtworkRefreshActive ? "wand.and.stars" : "photo.on.rectangle.angled")
+                    Image(systemName: isRunningRepairDoctor ? "heart.text.square" : (isExperimentalArtworkRefreshActive ? "wand.and.stars" : "photo.on.rectangle.angled"))
                         .font(.system(size: 25, weight: .semibold))
                         .foregroundColor(.accentColor)
                 }
 
                 VStack(spacing: 6) {
-                    Text(isExperimentalArtworkRefreshActive ? "Refreshing Metadata & Artwork" : "Fixing Artwork")
+                    Text(isRunningRepairDoctor ? "Clean & Repair Library" : (isExperimentalArtworkRefreshActive ? "Refreshing Metadata & Artwork" : "Fixing Artwork"))
                         .font(.headline)
                         .foregroundColor(.primary)
 
@@ -1177,19 +1217,21 @@ struct SettingsView: View {
                         .frame(maxWidth: .infinity)
                 }
 
-                Button {
-                    manager.artworkRepairCancelled = true
-                    isRebuildingAlbumArtwork = false
-                    isFixingArtwork = false
-                    artworkFixMessage = "Cancelling..."
-                } label: {
-                    Text("Cancel")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                        .background(Color(.systemGray6))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                if !isRunningRepairDoctor {
+                    Button {
+                        manager.artworkRepairCancelled = true
+                        isRebuildingAlbumArtwork = false
+                        isFixingArtwork = false
+                        artworkFixMessage = "Cancelling..."
+                    } label: {
+                        Text("Cancel")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundColor(.secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color(.systemGray6))
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
                 }
             }
             .padding(24)
@@ -1469,6 +1511,29 @@ struct SettingsView: View {
                     title: success ? message : "Advanced Artwork & Metadata Fix Failed: \(message)",
                     icon: success ? "checkmark.circle.fill" : "xmark.circle.fill"
                 )
+            }
+        }
+    }
+
+    private func runDatabaseRepairDoctor() {
+        isRunningRepairDoctor = true
+        updateArtworkFixProgress("Starting library cleanup & repair...")
+        
+        manager.runDatabaseRepairDoctor { statusMessage, progressFraction in
+            DispatchQueue.main.async {
+                self.status = statusMessage
+                self.artworkFixMessage = statusMessage
+                self.artworkFixProgress = progressFraction
+            }
+        } completion: { success, message in
+            DispatchQueue.main.async {
+                self.isRunningRepairDoctor = false
+                self.artworkFixProgress = nil
+                if success {
+                    self.showToastMessage(title: "Library Repaired!", icon: "shield.checkmark.fill")
+                } else {
+                    self.showToastMessage(title: "Repair Failed: \(message)", icon: "exclamationmark.triangle.fill")
+                }
             }
         }
     }
