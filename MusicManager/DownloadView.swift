@@ -4131,9 +4131,9 @@ final class DownloadViewModel: ObservableObject {
     private func beginBackgroundTaskIfNeeded() {
         guard backgroundDownloadsEnabled else { return }
         guard backgroundTaskID == .invalid else { return }
-        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "DownloadQueue") { [weak self] in
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "DownloadQueue") {
             Logger.shared.log("[Download] Background task expired while queue was active")
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.endBackgroundTaskIfNeeded()
             }
         }
