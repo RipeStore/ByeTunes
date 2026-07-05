@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		D1A100000000000000000002 /* MusicManagerLiveActivity.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = D1A100000000000000000001 /* MusicManagerLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		BB302E282F0D69FF00BB151F /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -21,12 +25,34 @@
 			remoteGlobalIDString = BB302E192F0D69FD00BB151F;
 			remoteInfo = MusicManager;
 		};
+		D1A100000000000000000008 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BB302E122F0D69FD00BB151F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D1A100000000000000000007;
+			remoteInfo = MusicManagerLiveActivity;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		D1A100000000000000000006 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				D1A100000000000000000002 /* MusicManagerLiveActivity.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		BB302E1A2F0D69FD00BB151F /* ByeTunes.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ByeTunes.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB302E272F0D69FF00BB151F /* MusicManagerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MusicManagerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB302E312F0D69FF00BB151F /* MusicManagerUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MusicManagerUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D1A100000000000000000001 /* MusicManagerLiveActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = MusicManagerLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -36,6 +62,13 @@
 				Info.plist,
 			);
 			target = BB302E192F0D69FD00BB151F /* MusicManager */;
+		};
+		D1A100000000000000000003 /* Exceptions for "MusicManagerLiveActivity" folder in "MusicManagerLiveActivity" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = D1A100000000000000000007 /* MusicManagerLiveActivity */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -56,6 +89,19 @@
 		BB302E342F0D69FF00BB151F /* MusicManagerUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = MusicManagerUITests;
+			sourceTree = "<group>";
+		};
+		D1A100000000000000000004 /* MusicManagerActivityShared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MusicManagerActivityShared;
+			sourceTree = "<group>";
+		};
+		D1A100000000000000000005 /* MusicManagerLiveActivity */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				D1A100000000000000000003 /* Exceptions for "MusicManagerLiveActivity" folder in "MusicManagerLiveActivity" target */,
+			);
+			path = MusicManagerLiveActivity;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -82,13 +128,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D1A10000000000000000000D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		BB302E112F0D69FD00BB151F = {
 			isa = PBXGroup;
 			children = (
+				D1A100000000000000000004 /* MusicManagerActivityShared */,
 				BB302E1C2F0D69FD00BB151F /* MusicManager */,
+				D1A100000000000000000005 /* MusicManagerLiveActivity */,
 				BB302E2A2F0D69FF00BB151F /* MusicManagerTests */,
 				BB302E342F0D69FF00BB151F /* MusicManagerUITests */,
 				BB302E1B2F0D69FD00BB151F /* Products */,
@@ -99,6 +154,7 @@
 			isa = PBXGroup;
 			children = (
 				BB302E1A2F0D69FD00BB151F /* ByeTunes.app */,
+				D1A100000000000000000001 /* MusicManagerLiveActivity.appex */,
 				BB302E272F0D69FF00BB151F /* MusicManagerTests.xctest */,
 				BB302E312F0D69FF00BB151F /* MusicManagerUITests.xctest */,
 			);
@@ -115,17 +171,18 @@
 				BB302E162F0D69FD00BB151F /* Sources */,
 				BB302E172F0D69FD00BB151F /* Frameworks */,
 				BB302E182F0D69FD00BB151F /* Resources */,
+				D1A100000000000000000006 /* Embed App Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				D1A100000000000000000009 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				BB302E1C2F0D69FD00BB151F /* MusicManager */,
+				D1A100000000000000000004 /* MusicManagerActivityShared */,
 			);
 			name = MusicManager;
-			packageProductDependencies = (
-			);
 			productName = ByeTunes;
 			productReference = BB302E1A2F0D69FD00BB151F /* ByeTunes.app */;
 			productType = "com.apple.product-type.application";
@@ -147,8 +204,6 @@
 				BB302E2A2F0D69FF00BB151F /* MusicManagerTests */,
 			);
 			name = MusicManagerTests;
-			packageProductDependencies = (
-			);
 			productName = MusicManagerTests;
 			productReference = BB302E272F0D69FF00BB151F /* MusicManagerTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
@@ -170,11 +225,30 @@
 				BB302E342F0D69FF00BB151F /* MusicManagerUITests */,
 			);
 			name = MusicManagerUITests;
-			packageProductDependencies = (
-			);
 			productName = MusicManagerUITests;
 			productReference = BB302E312F0D69FF00BB151F /* MusicManagerUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		D1A100000000000000000007 /* MusicManagerLiveActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D1A10000000000000000000C /* Build configuration list for PBXNativeTarget "MusicManagerLiveActivity" */;
+			buildPhases = (
+				D1A10000000000000000000E /* Sources */,
+				D1A10000000000000000000D /* Frameworks */,
+				D1A10000000000000000000F /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				D1A100000000000000000004 /* MusicManagerActivityShared */,
+				D1A100000000000000000005 /* MusicManagerLiveActivity */,
+			);
+			name = MusicManagerLiveActivity;
+			productName = MusicManagerLiveActivity;
+			productReference = D1A100000000000000000001 /* MusicManagerLiveActivity.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -197,6 +271,9 @@
 						CreatedOnToolsVersion = 26.1.1;
 						TestTargetID = BB302E192F0D69FD00BB151F;
 					};
+					D1A100000000000000000007 = {
+						CreatedOnToolsVersion = 26.1.1;
+					};
 				};
 			};
 			buildConfigurationList = BB302E152F0D69FD00BB151F /* Build configuration list for PBXProject "MusicManager" */;
@@ -208,14 +285,13 @@
 			);
 			mainGroup = BB302E112F0D69FD00BB151F;
 			minimizedProjectReferenceProxies = 1;
-			packageReferences = (
-			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = BB302E1B2F0D69FD00BB151F /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				BB302E192F0D69FD00BB151F /* MusicManager */,
+				D1A100000000000000000007 /* MusicManagerLiveActivity */,
 				BB302E262F0D69FF00BB151F /* MusicManagerTests */,
 				BB302E302F0D69FF00BB151F /* MusicManagerUITests */,
 			);
@@ -238,6 +314,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		BB302E2F2F0D69FF00BB151F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D1A10000000000000000000F /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -268,6 +351,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D1A10000000000000000000E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -280,6 +370,11 @@
 			isa = PBXTargetDependency;
 			target = BB302E192F0D69FD00BB151F /* MusicManager */;
 			targetProxy = BB302E322F0D69FF00BB151F /* PBXContainerItemProxy */;
+		};
+		D1A100000000000000000009 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D1A100000000000000000007 /* MusicManagerLiveActivity */;
+			targetProxy = D1A100000000000000000008 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -415,15 +510,18 @@
 				CURRENT_PROJECT_VERSION = 2.2;
 				DEVELOPMENT_TEAM = KGUDPSN289;
 				ENABLE_PREVIEWS = YES;
+				EXECUTABLE_PREFIX = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/**";
 				INFOPLIST_FILE = MusicManager/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = ByeTunes;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
+				INFOPLIST_KEY_NSSupportsLiveActivitiesFrequentUpdates = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_UISupportsDocumentBrowser = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -433,9 +531,8 @@
 					"$(inherited)",
 					"$(PROJECT_DIR)/MusicManager",
 				);
-				MARKETING_VERSION = 2.3;
+				MARKETING_VERSION = 2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.EduAlexxis.MusicManager;
-				EXECUTABLE_PREFIX = "";
 				PRODUCT_NAME = ByeTunes;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -459,15 +556,18 @@
 				CURRENT_PROJECT_VERSION = 2.2;
 				DEVELOPMENT_TEAM = KGUDPSN289;
 				ENABLE_PREVIEWS = YES;
+				EXECUTABLE_PREFIX = "";
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/**";
 				INFOPLIST_FILE = MusicManager/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = ByeTunes;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
+				INFOPLIST_KEY_NSSupportsLiveActivitiesFrequentUpdates = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortrait";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_UISupportsDocumentBrowser = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -477,9 +577,8 @@
 					"$(inherited)",
 					"$(PROJECT_DIR)/MusicManager",
 				);
-				MARKETING_VERSION = 2.3;
+				MARKETING_VERSION = 2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.EduAlexxis.MusicManager;
-				EXECUTABLE_PREFIX = "";
 				PRODUCT_NAME = ByeTunes;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -502,7 +601,7 @@
 				DEVELOPMENT_TEAM = KGUDPSN289;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
-				MARKETING_VERSION = 2.3;
+				MARKETING_VERSION = 2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.EduAlexxis.MusicManagerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -524,7 +623,7 @@
 				DEVELOPMENT_TEAM = KGUDPSN289;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
-				MARKETING_VERSION = 2.3;
+				MARKETING_VERSION = 2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.EduAlexxis.MusicManagerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -544,7 +643,7 @@
 				CURRENT_PROJECT_VERSION = 2.2;
 				DEVELOPMENT_TEAM = KGUDPSN289;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 2.3;
+				MARKETING_VERSION = 2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.EduAlexxis.MusicManagerUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -564,7 +663,7 @@
 				CURRENT_PROJECT_VERSION = 2.2;
 				DEVELOPMENT_TEAM = KGUDPSN289;
 				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 2.3;
+				MARKETING_VERSION = 2.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.EduAlexxis.MusicManagerUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -574,6 +673,64 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_TARGET_NAME = MusicManager;
+			};
+			name = Release;
+		};
+		D1A10000000000000000000A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2.2;
+				DEVELOPMENT_TEAM = KGUDPSN289;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MusicManagerLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 2.4;
+				PRODUCT_BUNDLE_IDENTIFIER = com.EduAlexxis.MusicManager.DownloadActivityExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		D1A10000000000000000000B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 2.2;
+				DEVELOPMENT_TEAM = KGUDPSN289;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = MusicManagerLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.1;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 2.4;
+				PRODUCT_BUNDLE_IDENTIFIER = com.EduAlexxis.MusicManager.DownloadActivityExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
@@ -612,6 +769,15 @@
 			buildConfigurations = (
 				BB302E422F0D69FF00BB151F /* Debug */,
 				BB302E432F0D69FF00BB151F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D1A10000000000000000000C /* Build configuration list for PBXNativeTarget "MusicManagerLiveActivity" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D1A10000000000000000000A /* Debug */,
+				D1A10000000000000000000B /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

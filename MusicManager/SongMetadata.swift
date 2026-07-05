@@ -7,7 +7,7 @@ import CoreMedia
 import AudioToolbox
 
 
-struct AppleMusicArtworkColors {
+struct AppleMusicArtworkColors: Codable {
     var backgroundColor: String
     var primaryTextColor: String
     var secondaryTextColor: String
@@ -83,9 +83,6 @@ struct SongMetadata: Identifiable {
     var xid: String?
     var releaseDate: Int = 0
 
-    /// Hex color string (#RRGGBB) manually chosen by the user to override the
-    /// album background color shown in the iOS music player. Takes precedence
-    /// over both the Apple Music catalog color and the artwork-derived color.
     var customAlbumBackgroundColor: String? = nil
 
     var richAppleMetadataFetched: Bool = false
@@ -142,6 +139,14 @@ struct SongMetadata: Identifiable {
 
     var hasSpatialAudioTrait: Bool {
         localFileHasSpatialAudio || appleMusicAudioTraits.contains { $0.caseInsensitiveCompare("spatial") == .orderedSame }
+    }
+
+    var hasAppleLosslessTrait: Bool {
+        appleMusicAudioTraits.contains { trait in
+            trait.caseInsensitiveCompare("lossless") == .orderedSame ||
+            trait.caseInsensitiveCompare("hi-res-lossless") == .orderedSame ||
+            trait.caseInsensitiveCompare("hires-lossless") == .orderedSame
+        }
     }
     
     
@@ -247,6 +252,8 @@ struct SongMetadata: Identifiable {
             return 301
         case "flac":
             return 1716281667
+        case "opus":
+            return 1869641075
         case "m4a", "aac", "m4r":
             return 1633772320
         case "alac":
@@ -1070,10 +1077,10 @@ struct SongMetadata: Identifiable {
         guard let url = URL(string: urlString) else { return nil }
         
         var request = URLRequest(url: url)
-        request.setValue("ByeTunes/2.3 (https://github.com/EduAlexxis/ByeTunes)", forHTTPHeaderField: "User-Agent")
+        request.setValue("ByeTunes/2.4 (https://github.com/EduAlexxis/ByeTunes)", forHTTPHeaderField: "User-Agent")
         
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await SongMetadataNetworking.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
             
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -1174,7 +1181,7 @@ struct SongMetadata: Identifiable {
         var request = URLRequest(url: signedURL)
         request.setValue(musixMatchUserAgent, forHTTPHeaderField: "User-Agent")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await SongMetadataNetworking.data(for: request)
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
         if statusCode != 200 {
             return nil
@@ -1297,7 +1304,7 @@ struct SongMetadata: Identifiable {
         var request = URLRequest(url: appURL)
         request.setValue(musixMatchUserAgent, forHTTPHeaderField: "User-Agent")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await SongMetadataNetworking.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
@@ -1341,7 +1348,7 @@ struct SongMetadata: Identifiable {
         request.setValue(musixMatchUserAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("mxm_bab=AB", forHTTPHeaderField: "Cookie")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await SongMetadataNetworking.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
@@ -1466,7 +1473,7 @@ struct SongMetadata: Identifiable {
         request.setValue("os=iPhone OS; appver=10.0.0; osver=16.2; channel=distribution; deviceId=\(netEaseDefaultDeviceID)", forHTTPHeaderField: "Cookie")
         request.httpBody = "params=\(encryptedPayload)".data(using: .utf8)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await SongMetadataNetworking.data(for: request)
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard statusCode == 200 else { return nil }
         if let decryptedData = aesECBHexDecrypt(data, key: netEaseEapiAESKey),
@@ -1698,10 +1705,10 @@ extension SongMetadata {
         guard let url = URL(string: "https://lrclib.net/api/search?q=\(encodedQuery)") else { return [] }
         
         var request = URLRequest(url: url)
-        request.setValue("ByeTunes/2.3 (https://github.com/EduAlexxis/ByeTunes)", forHTTPHeaderField: "User-Agent")
+        request.setValue("ByeTunes/2.4 (https://github.com/EduAlexxis/ByeTunes)", forHTTPHeaderField: "User-Agent")
         
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await SongMetadataNetworking.data(for: request)
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
             guard statusCode == 200 else { return [] }
             let results = try JSONDecoder().decode([LRCLIBResult].self, from: data)
@@ -1994,7 +2001,7 @@ extension SongMetadata {
         enrichedSong.storefrontId = storefrontMap[region] ?? 143441
         
         if let artworkUrl = amsMatch.attributes.artwork?.artworkURL() {
-            if let (data, _) = try? await URLSession.shared.data(from: artworkUrl) {
+            if let (data, _) = try? await SongMetadataNetworking.data(from: artworkUrl) {
                 enrichedSong.artworkData = data
             }
         }
@@ -2043,7 +2050,7 @@ extension SongMetadata {
         }
         
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await SongMetadataNetworking.data(from: url)
             let result = try JSONDecoder().decode(iTunesSearchResult.self, from: data)
             return result.results
         } catch {
@@ -2063,7 +2070,7 @@ extension SongMetadata {
         if let aId = match.artistId { newSong.artistId = Int64(aId) }
         if let cId = match.collectionId { newSong.playlistId = Int64(cId) }
         if let tId = match.trackId { newSong.storeId = Int64(tId) }
-        newSong.storefrontId = 143441 // Default to US Storefront for injected tracks
+        newSong.storefrontId = 143441
         
         newSong.trackNumber = match.trackNumber
         newSong.trackCount = match.trackCount
@@ -2084,7 +2091,7 @@ extension SongMetadata {
             
             let highResUrlString = artUrl.replacingOccurrences(of: "100x100bb", with: "1200x1200bb")
             if let highResUrl = URL(string: highResUrlString),
-               let (artData, _) = try? await URLSession.shared.data(from: highResUrl) {
+               let (artData, _) = try? await SongMetadataNetworking.data(from: highResUrl) {
                 newSong.artworkData = artData
                 Logger.shared.log("[SongMetadata] Updated artwork with iTunes High-Res version: \(artData.count) bytes")
             }
@@ -2240,7 +2247,7 @@ extension SongMetadata {
         }
         
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await SongMetadataNetworking.data(from: url)
             let result = try JSONDecoder().decode(DeezerSearchResult.self, from: data)
             return result.data
         } catch {
@@ -2253,7 +2260,7 @@ extension SongMetadata {
         guard let url = URL(string: "https://api.deezer.com/track/\(id)") else { return nil }
 
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await SongMetadataNetworking.data(from: url)
             return try JSONDecoder().decode(DeezerTrackDetails.self, from: data)
         } catch {
             Logger.shared.log("[SongMetadata] Failed to fetch Deezer track details: \(error)")
@@ -2270,7 +2277,7 @@ extension SongMetadata {
         guard let url = URL(string: "https://api.deezer.com/track/isrc:\(encoded)") else { return nil }
 
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await SongMetadataNetworking.data(from: url)
             return try JSONDecoder().decode(DeezerSong.self, from: data)
         } catch {
             Logger.shared.log("[SongMetadata] Deezer ISRC lookup failed for \(trimmed): \(error)")
@@ -2309,7 +2316,7 @@ extension SongMetadata {
         
         
         if let artUrl = URL(string: match.album.cover_xl),
-           let (artData, _) = try? await URLSession.shared.data(from: artUrl) {
+           let (artData, _) = try? await SongMetadataNetworking.data(from: artUrl) {
             newSong.artworkData = artData
             Logger.shared.log("[SongMetadata] Updated artwork with Deezer High-Res version: \(artData.count) bytes")
         }
@@ -2599,11 +2606,11 @@ actor AppleMusicAPI {
         let digitalMaster: Bool?
     }
 
-    private struct AppleMusicDirectSongResponse: Codable {
-        let data: [AppleMusicSong]
-    }
-    
     func searchSongs(query: String, limit: Int = 5, offset: Int = 0) async -> [AppleMusicSong] {
+        return await searchSongsViaPublicSearch(query: query, limit: limit, offset: offset).songs
+    }
+
+    func searchSongsWithAvailability(query: String, limit: Int, offset: Int) async -> (songs: [AppleMusicSong], hasMore: Bool) {
         return await searchSongsViaPublicSearch(query: query, limit: limit, offset: offset)
     }
 
@@ -2833,6 +2840,7 @@ actor AppleMusicAPI {
             let albumName = item.tertiaryLinks?.first?.title
             let albumID = item.tertiaryLinks?.first?.segue?.destination?.contentDescriptor?.identifiers?.storeAdamID
             let artwork = mapPublicArtwork(item.artwork?.dictionary) ?? fallbackArtwork
+            let audioTraits = traits(from: item.audioBadges)
 
             let relationships = AppleMusicSongRelationships(
                 albums: albumID.map {
@@ -2852,7 +2860,7 @@ actor AppleMusicAPI {
                     artistName: artistName,
                     albumName: albumName,
                     url: item.contentDescriptor?.url ?? playlistURL,
-                    audioTraits: nil,
+                    audioTraits: audioTraits,
                     genreNames: nil,
                     isrc: nil,
                     contentRating: (item.showExplicitBadge ?? false) ? "explicit" : nil,
@@ -2860,8 +2868,8 @@ actor AppleMusicAPI {
                     trackNumber: item.trackNumber,
                     discNumber: item.discNumber,
                     durationInMillis: item.duration,
-                    isAppleDigitalMaster: nil,
-                    isMasteredForItunes: nil,
+                    isAppleDigitalMaster: item.audioBadges?.digitalMaster,
+                    isMasteredForItunes: item.audioBadges?.digitalMaster,
                     artwork: artwork
                 ),
                 relationships: relationships
@@ -2907,7 +2915,7 @@ actor AppleMusicAPI {
         request.setValue(browserUserAgent, forHTTPHeaderField: "User-Agent")
 
         do {
-            let (data, _) = try await URLSession.shared.data(for: request)
+            let (data, _) = try await SongMetadataNetworking.data(for: request)
             guard let html = String(data: data, encoding: .utf8) else { return [] }
             let pattern = #"<script[^>]*type="application/json"[^>]*>(.*?)</script>"#
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]),
@@ -2938,7 +2946,7 @@ actor AppleMusicAPI {
         request.setValue(browserUserAgent, forHTTPHeaderField: "User-Agent")
 
         do {
-            let (data, _) = try await URLSession.shared.data(for: request)
+            let (data, _) = try await SongMetadataNetworking.data(for: request)
             guard let html = String(data: data, encoding: .utf8) else { return nil }
             let pattern = #"<script[^>]*type="application/json"[^>]*>(.*?)</script>"#
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]),
@@ -2956,15 +2964,16 @@ actor AppleMusicAPI {
         }
     }
 
-    private func searchSongsViaPublicSearch(query: String, limit: Int, offset: Int) async -> [AppleMusicSong] {
+    private func searchSongsViaPublicSearch(query: String, limit: Int, offset: Int) async -> (songs: [AppleMusicSong], hasMore: Bool) {
         let sectionItems = await fetchPublicSearchSection(query: query, title: "Songs")
-        guard offset < sectionItems.count else { return [] }
+        guard offset < sectionItems.count else { return ([], false) }
+        let hasMore = sectionItems.count > offset + limit
         let page = Array(sectionItems.dropFirst(offset).prefix(limit))
 
         let lightweightSongs = page.compactMap(mapPublicSearchSong)
-        guard !lightweightSongs.isEmpty else { return [] }
+        guard !lightweightSongs.isEmpty else { return ([], false) }
 
-        return await withTaskGroup(of: (Int, AppleMusicSong).self) { group in
+        let songs = await withTaskGroup(of: (Int, AppleMusicSong).self) { group in
             for (index, song) in lightweightSongs.enumerated() {
                 group.addTask {
                     if song.attributes.albumName != nil {
@@ -2988,6 +2997,7 @@ actor AppleMusicAPI {
             }
             return orderedSongs.compactMap { $0 }
         }
+        return (songs, hasMore)
     }
 
     private func fetchSongViaPublicPage(urlString: String?, expectedTrackID: String) async -> AppleMusicSong? {
@@ -2999,7 +3009,7 @@ actor AppleMusicAPI {
         request.setValue(browserUserAgent, forHTTPHeaderField: "User-Agent")
 
         do {
-            let (data, _) = try await URLSession.shared.data(for: request)
+            let (data, _) = try await SongMetadataNetworking.data(for: request)
             guard let html = String(data: data, encoding: .utf8) else { return nil }
             let pattern = #"<script[^>]*type="application/json"[^>]*>(.*?)</script>"#
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]),

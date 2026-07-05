@@ -7,8 +7,7 @@ struct Config {
            let url = dict["ByeTunesApiUrl"] as? String {
             return url
         }
-        // Fallback default so the app compiles and runs for others (with a placeholder API URL)
-        return "https://api.placeholder-byetunes-xyz.com"
+        return "https://127.0.0.1"
     }()
     
     static let byeTunesApiHost: String = {

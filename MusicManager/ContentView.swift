@@ -1,6 +1,10 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+extension Notification.Name {
+    static let importDownloadedSongs = Notification.Name("ImportDownloadedSongs")
+}
+
 struct AppUpdateInfo: Identifiable, Equatable {
     let id = UUID()
     let version: String
@@ -9,7 +13,7 @@ struct AppUpdateInfo: Identifiable, Equatable {
 }
 
 enum AppUpdateChecker {
-    static let currentVersion = "2.3"
+    static let currentVersion = "2.4"
     static let releasesURL = URL(string: "https://github.com/EduAlexxis/ByeTunes/releases")!
 
     private struct GitHubRelease: Decodable {
@@ -96,7 +100,7 @@ struct ContentView: View {
     @State private var rpPairingUpgradeError: String?
     @State private var availableUpdate: AppUpdateInfo?
     @State private var dismissedUpdateVersion: String?
-    
+
     // MARK: - iOS 26+ Version Check (GlassUI Support)
     private var isIOS26OrLater: Bool {
         let version = ProcessInfo.processInfo.operatingSystemVersion
@@ -186,6 +190,9 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ShowLogViewer"))) { _ in
             showingLogViewer = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ResetOnboardingFlow"))) { _ in
+            hasCompletedOnboarding = false
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("AddSongToQueue"))) { notification in
             if let song = notification.object as? SongMetadata {
                 withAnimation {
@@ -213,15 +220,20 @@ struct ContentView: View {
             checkForAppUpdate()
         }
         .onOpenURL { url in
-            // Handle incoming Apple Music / Spotify links via URL open
+            if url.scheme?.lowercased() == "byetunes" {
+                let host = (url.host ?? "").lowercased()
+                if host == "download" {
+                    selectedTab = isIOS26OrLater ? 1 : 1
+                    return
+                }
+            }
+
             let host = (url.host ?? "").lowercased()
             if host.contains("spotify.com") || host.contains("music.apple.com") {
                 if let normalized = LinkNormalizer.normalize(url) {
-                    // Determine Download tab index (depends on whether Ringtones tab is shown on this OS)
                     let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
                     let showRingtonesTab = (16...18).contains(major)
                     let downloadTabIndex = showRingtonesTab ? 2 : 1
-                    // Switch to Download tab and notify listeners
                     self.selectedTab = downloadTabIndex
                     NotificationCenter.default.post(name: NSNotification.Name("IncomingMusicLink"), object: normalized.normalizedURL.absoluteString)
                 }
@@ -233,7 +245,7 @@ struct ContentView: View {
         .onChange(of: scenePhase) { newPhase in
             if newPhase == .active {
                 attemptAutoReconnectIfNeeded()
-            } else {
+            } else if newPhase == .background {
                 manager.stopHeartbeat()
             }
         }
@@ -303,7 +315,7 @@ struct ContentView: View {
             options: [.skipsHiddenFiles]
         ) else { return }
 
-        let audioExts: Set<String> = ["mp3", "m4a", "wav", "aiff", "flac", "m4r"]
+        let audioExts: Set<String> = ["mp3", "m4a", "wav", "aiff", "flac", "opus", "m4r"]
         for fileURL in files {
             let ext = fileURL.pathExtension.lowercased()
             guard audioExts.contains(ext) else { continue }
@@ -360,7 +372,7 @@ struct ContentView: View {
                         autoInjectRingtones([ringtone])
                     }
                 }
-            } else if ["mp3", "m4a", "wav", "flac", "aiff"].contains(ext) {
+            } else if ["mp3", "m4a", "wav", "flac", "aiff", "opus"].contains(ext) {
                 
                 Task {
                     if let song = try? await SongMetadata.fromURL(destURL) {
@@ -486,7 +498,7 @@ struct ContentView: View {
                         ringtones.append(ringtone)
                         selectedTab = 1 
                     }
-                } else if ["mp3", "m4a", "wav", "flac", "aiff"].contains(ext) {
+                } else if ["mp3", "m4a", "wav", "flac", "aiff", "opus"].contains(ext) {
                     
                     if let song = try? await SongMetadata.fromURL(fileURL) {
                         await MainActor.run {

@@ -20,6 +20,28 @@ struct PersistedSong: Codable {
     var lyrics: String?
     var explicitRating: Int
     var richAppleMetadataFetched: Bool
+
+    var storeId: Int64?
+    var storefrontId: Int64?
+    var artistId: Int64?
+    var composerId: Int64?
+    var playlistId: Int64?
+    var genreStoreId: Int64?
+    var copyright: String?
+    var xid: String?
+    var releaseDate: Int?
+    var customAlbumBackgroundColor: String?
+    var appleMusicArtworkColors: AppleMusicArtworkColors?
+    var appleMusicAudioTraits: [String]?
+    var isMasteredForItunes: Bool?
+    var isAppleDigitalMaster: Bool?
+    var playbackAudioFormat: Int?
+    var playbackCodecType: Int?
+    var playbackCodecSubtype: Int?
+    var playbackSampleRate: Double?
+    var playbackBitRate: Int?
+    var localFileHasDolbyAtmos: Bool?
+    var localFileHasSpatialAudio: Bool?
 }
 
 struct PersistedDownloadTrack: Codable {
@@ -45,11 +67,24 @@ struct PersistedDownloadQueue: Codable {
     var activeID: String?
     var totalQueueCount: Int
     var completedQueueCount: Int
+    var failureReasons: [String: String]? = nil
+}
+
+struct PersistedDeferredDownloadEnrichment: Codable {
+    var localURLPath: String
+    var track: PersistedDownloadTrack
+}
+
+struct PersistedPendingDownloadedImport: Codable {
+    var localURLPath: String
+    var trackID: String?
 }
 
 enum QueuePersistenceStore {
     private static let musicQueueKey = "persistedMusicQueue.v1"
     private static let downloadQueueKey = "persistedDownloadQueue.v1"
+    private static let deferredDownloadEnrichmentKey = "persistedDeferredDownloadEnrichment.v1"
+    private static let pendingDownloadedImportKey = "persistedPendingDownloadedImport.v1"
 
     @MainActor
     static func saveMusicQueue(_ songs: [SongMetadata]) {
@@ -88,6 +123,38 @@ enum QueuePersistenceStore {
 
     static func clearDownloadQueue() {
         UserDefaults.standard.removeObject(forKey: downloadQueueKey)
+    }
+
+    static func saveDeferredDownloadEnrichments(_ enrichments: [PersistedDeferredDownloadEnrichment]) {
+        if enrichments.isEmpty {
+            UserDefaults.standard.removeObject(forKey: deferredDownloadEnrichmentKey)
+            return
+        }
+        save(enrichments, forKey: deferredDownloadEnrichmentKey)
+    }
+
+    static func loadDeferredDownloadEnrichments() -> [PersistedDeferredDownloadEnrichment] {
+        load([PersistedDeferredDownloadEnrichment].self, forKey: deferredDownloadEnrichmentKey) ?? []
+    }
+
+    static func clearDeferredDownloadEnrichments() {
+        UserDefaults.standard.removeObject(forKey: deferredDownloadEnrichmentKey)
+    }
+
+    static func savePendingDownloadedImports(_ imports: [PersistedPendingDownloadedImport]) {
+        if imports.isEmpty {
+            UserDefaults.standard.removeObject(forKey: pendingDownloadedImportKey)
+            return
+        }
+        save(imports, forKey: pendingDownloadedImportKey)
+    }
+
+    static func loadPendingDownloadedImports() -> [PersistedPendingDownloadedImport] {
+        load([PersistedPendingDownloadedImport].self, forKey: pendingDownloadedImportKey) ?? []
+    }
+
+    static func clearPendingDownloadedImports() {
+        UserDefaults.standard.removeObject(forKey: pendingDownloadedImportKey)
     }
 
     private static func save<T: Encodable>(_ value: T, forKey key: String) {
@@ -132,6 +199,27 @@ extension PersistedSong {
         self.lyrics = song.lyrics
         self.explicitRating = song.explicitRating
         self.richAppleMetadataFetched = song.richAppleMetadataFetched
+        self.storeId = song.storeId
+        self.storefrontId = song.storefrontId
+        self.artistId = song.artistId
+        self.composerId = song.composerId
+        self.playlistId = song.playlistId
+        self.genreStoreId = song.genreStoreId
+        self.copyright = song.copyright
+        self.xid = song.xid
+        self.releaseDate = song.releaseDate
+        self.customAlbumBackgroundColor = song.customAlbumBackgroundColor
+        self.appleMusicArtworkColors = song.appleMusicArtworkColors
+        self.appleMusicAudioTraits = song.appleMusicAudioTraits
+        self.isMasteredForItunes = song.isMasteredForItunes
+        self.isAppleDigitalMaster = song.isAppleDigitalMaster
+        self.playbackAudioFormat = song.playbackAudioFormat
+        self.playbackCodecType = song.playbackCodecType
+        self.playbackCodecSubtype = song.playbackCodecSubtype
+        self.playbackSampleRate = song.playbackSampleRate
+        self.playbackBitRate = song.playbackBitRate
+        self.localFileHasDolbyAtmos = song.localFileHasDolbyAtmos
+        self.localFileHasSpatialAudio = song.localFileHasSpatialAudio
     }
 
     @MainActor
@@ -157,6 +245,27 @@ extension PersistedSong {
         )
         song.explicitRating = explicitRating
         song.richAppleMetadataFetched = richAppleMetadataFetched
+        song.storeId = storeId ?? 0
+        song.storefrontId = storefrontId ?? 0
+        song.artistId = artistId ?? 0
+        song.composerId = composerId ?? 0
+        song.playlistId = playlistId ?? 0
+        song.genreStoreId = genreStoreId ?? 0
+        song.copyright = copyright
+        song.xid = xid
+        song.releaseDate = releaseDate ?? 0
+        song.customAlbumBackgroundColor = customAlbumBackgroundColor
+        song.appleMusicArtworkColors = appleMusicArtworkColors
+        song.appleMusicAudioTraits = appleMusicAudioTraits ?? []
+        song.isMasteredForItunes = isMasteredForItunes ?? false
+        song.isAppleDigitalMaster = isAppleDigitalMaster ?? false
+        song.playbackAudioFormat = playbackAudioFormat ?? 0
+        song.playbackCodecType = playbackCodecType ?? 0
+        song.playbackCodecSubtype = playbackCodecSubtype ?? 0
+        song.playbackSampleRate = playbackSampleRate ?? 0
+        song.playbackBitRate = playbackBitRate ?? 0
+        song.localFileHasDolbyAtmos = localFileHasDolbyAtmos ?? false
+        song.localFileHasSpatialAudio = localFileHasSpatialAudio ?? false
         return song
     }
 }

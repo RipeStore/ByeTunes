@@ -3,41 +3,6 @@ import SQLite3
 import CommonCrypto
 import UIKit
 
-
-private func computeSHA1(data: Data) -> String {
-    var hash = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
-    data.withUnsafeBytes { bytes in
-        _ = CC_SHA1(bytes.baseAddress, CC_LONG(data.count), &hash)
-    }
-    return hash.map { String(format: "%02x", $0) }.joined()
-}
-
-
-
-
-private func fetchArtworkURLFromiTunes(title: String, artist: String) -> String? {
-    let searchQuery = "\(artist) \(title)"
-        .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-    guard let url = URL(string: "https://itunes.apple.com/search?term=\(searchQuery)&entity=song&limit=5") else {
-        return nil
-    }
-    let semaphore = DispatchSemaphore(value: 0)
-    var artworkURL: String?
-    URLSession.shared.dataTask(with: url) { data, response, error in
-        defer { semaphore.signal() }
-        guard let data = data,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let results = json["results"] as? [[String: Any]],
-              let firstResult = results.first,
-              let artworkUrl100 = firstResult["artworkUrl100"] as? String else {
-            return
-        }
-        artworkURL = artworkUrl100.replacingOccurrences(of: "100x100bb", with: "1200x1200bb")
-    }.resume()
-    _ = semaphore.wait(timeout: .now() + 5)
-    return artworkURL
-}
-
 // MARK: - Database Version Support
 struct DatabaseVersion: Equatable {
     enum SchemaFamily: Equatable {
@@ -211,6 +176,8 @@ class MediaLibraryBuilder {
             return 301
         case "flac":
             return fourCC("fLaC")  
+        case "opus":
+            return fourCC("opus")
         case "m4a", "aac", "m4r":
             return fourCC("aac ")  
         case "alac":
@@ -398,6 +365,70 @@ class MediaLibraryBuilder {
         
         Logger.shared.log("[MediaLibraryBuilder] Merged database saved: \(dbPath.path)")
         return (dbPath, existingFiles, artworkInfo, songPids)
+    }
+
+    static func repairAlphabeticalOrdering(db: OpaquePointer?) throws {
+        Logger.shared.log("[MediaLibraryBuilder] 🔧 SORT FIX: Reordering sort_map alphabetically...")
+
+        try executeSQL(db, """
+            UPDATE sort_map SET name_section =
+                CASE
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 65 AND 90
+                    THEN UNICODE(UPPER(SUBSTR(name, 1, 1))) - 65
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 192 AND 197 THEN 0
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) = 199 THEN 2
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 200 AND 203 THEN 4
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 204 AND 207 THEN 8
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) = 209 THEN 13
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 210 AND 214 THEN 14
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 217 AND 220 THEN 20
+                    WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) = 221 THEN 24
+                    ELSE 26
+                END
+        """)
+
+        try executeSQL(db, "DROP TABLE IF EXISTS _sort_reorder")
+        try executeSQL(db, """
+            CREATE TEMP TABLE _sort_reorder AS
+            SELECT name, name_order AS old_order, name_section,
+                   ROW_NUMBER() OVER (ORDER BY
+                       CASE name_section WHEN 26 THEN -1 ELSE name_section END ASC,
+                       sort_key ASC
+                   ) AS new_order
+            FROM sort_map
+        """)
+
+        try executeSQL(db, """
+            UPDATE item SET
+                title_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.title_order), title_order),
+                title_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.title_order), title_order_section),
+                item_artist_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.item_artist_order), item_artist_order),
+                item_artist_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.item_artist_order), item_artist_order_section),
+                album_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.album_order), album_order),
+                album_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.album_order), album_order_section),
+                album_artist_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.album_artist_order), album_artist_order),
+                album_artist_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.album_artist_order), album_artist_order_section),
+                genre_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.genre_order), genre_order),
+                genre_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.genre_order), genre_order_section)
+        """)
+
+        try executeSQL(db, "UPDATE sort_map SET name_order = -(name_order + 1)")
+        try executeSQL(db, """
+            UPDATE sort_map SET name_order = (
+                SELECT new_order FROM _sort_reorder WHERE _sort_reorder.name = sort_map.name
+            )
+        """)
+
+        try executeSQL(db, """
+            UPDATE item_search SET
+                search_title = (SELECT title_order FROM item WHERE item.item_pid = item_search.item_pid),
+                search_album = (SELECT album_order FROM item WHERE item.item_pid = item_search.item_pid),
+                search_artist = (SELECT item_artist_order FROM item WHERE item.item_pid = item_search.item_pid),
+                search_album_artist = (SELECT album_artist_order FROM item WHERE item.item_pid = item_search.item_pid)
+        """)
+
+        try executeSQL(db, "DROP TABLE IF EXISTS _sort_reorder")
+        Logger.shared.log("[MediaLibraryBuilder] ✅ Sort reorder complete")
     }
 
     static func getExistingFilenames(db: OpaquePointer?) -> Set<String> {
@@ -835,7 +866,8 @@ class MediaLibraryBuilder {
                 .joined(separator: ",")
                 .replacingOccurrences(of: "'", with: "''")
             let hasAppleCatalogMatch = shouldWriteAppleCatalogStoreFields(for: song)
-            let subscriptionStoreItemId = (song.isDolbyAtmosCapable || song.hasSpatialAudioTrait) && hasAppleCatalogMatch
+            let hasAppleSubscriptionAudioTrait = song.isDolbyAtmosCapable || song.hasSpatialAudioTrait || song.hasAppleLosslessTrait
+            let subscriptionStoreItemId = hasAppleSubscriptionAudioTrait && hasAppleCatalogMatch
                 ? song.storeId
                 : 0
             let masteredForItunes = (song.isMasteredForItunes || song.isAppleDigitalMaster) ? 1 : 0
@@ -918,13 +950,7 @@ class MediaLibraryBuilder {
                 let folderName = String(hashString.prefix(2))
                 let fileName = String(hashString.dropFirst(2))
                 let relativePath = "\(folderName)/\(fileName)"
-                
-                Logger.shared.log("[MediaLibraryBuilder] ARTWORK (correct algorithm):")
-                Logger.shared.log("  -> Token: \(artToken)")
-                Logger.shared.log("  -> SHA1(token): \(hashString)")
-                Logger.shared.log("  -> relativePath: \(relativePath)")
-                
-                
+
                 collectedArtworkInfo.append(ArtworkInfo(
                     itemPid: itemPid, 
                     artworkHash: relativePath, 
@@ -1279,67 +1305,7 @@ class MediaLibraryBuilder {
         
         
         if reorderSortMap {
-            Logger.shared.log("[MediaLibraryBuilder] 🔧 SORT FIX: Reordering sort_map alphabetically...")
-
-            try? executeSQL(db, """
-                UPDATE sort_map SET name_section = 
-                    CASE 
-                        WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 65 AND 90 
-                        THEN UNICODE(UPPER(SUBSTR(name, 1, 1))) - 65
-                        WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 192 AND 197 THEN 0
-                        WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) = 199 THEN 2
-                        WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 200 AND 203 THEN 4
-                        WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 204 AND 207 THEN 8
-                        WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) = 209 THEN 13
-                        WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 210 AND 214 THEN 14
-                        WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) BETWEEN 217 AND 220 THEN 20
-                        WHEN UNICODE(UPPER(SUBSTR(name, 1, 1))) = 221 THEN 24
-                        ELSE 26
-                    END
-            """)
-
-            try? executeSQL(db, "DROP TABLE IF EXISTS _sort_reorder")
-            try? executeSQL(db, """
-                CREATE TEMP TABLE _sort_reorder AS
-                SELECT name, name_order AS old_order, name_section,
-                       ROW_NUMBER() OVER (ORDER BY 
-                           CASE name_section WHEN 26 THEN -1 ELSE name_section END ASC,
-                           sort_key ASC
-                       ) AS new_order
-                FROM sort_map
-            """)
-
-            try? executeSQL(db, """
-                UPDATE item SET
-                    title_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.title_order), title_order),
-                    title_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.title_order), title_order_section),
-                    item_artist_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.item_artist_order), item_artist_order),
-                    item_artist_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.item_artist_order), item_artist_order_section),
-                    album_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.album_order), album_order),
-                    album_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.album_order), album_order_section),
-                    album_artist_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.album_artist_order), album_artist_order),
-                    album_artist_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.album_artist_order), album_artist_order_section),
-                    genre_order = COALESCE((SELECT new_order FROM _sort_reorder WHERE old_order = item.genre_order), genre_order),
-                    genre_order_section = COALESCE((SELECT name_section FROM _sort_reorder WHERE old_order = item.genre_order), genre_order_section)
-            """)
-
-            try? executeSQL(db, "UPDATE sort_map SET name_order = -(name_order + 1)")
-            try? executeSQL(db, """
-                UPDATE sort_map SET name_order = (
-                    SELECT new_order FROM _sort_reorder WHERE _sort_reorder.name = sort_map.name
-                )
-            """)
-
-            try? executeSQL(db, """
-                UPDATE item_search SET
-                    search_title = (SELECT title_order FROM item WHERE item.item_pid = item_search.item_pid),
-                    search_album = (SELECT album_order FROM item WHERE item.item_pid = item_search.item_pid),
-                    search_artist = (SELECT item_artist_order FROM item WHERE item.item_pid = item_search.item_pid),
-                    search_album_artist = (SELECT album_artist_order FROM item WHERE item.item_pid = item_search.item_pid)
-            """)
-
-            try? executeSQL(db, "DROP TABLE IF EXISTS _sort_reorder")
-            Logger.shared.log("[MediaLibraryBuilder] ✅ Sort reorder complete")
+            try repairAlphabeticalOrdering(db: db)
         } else {
             Logger.shared.log("[MediaLibraryBuilder] Sort reorder skipped for merge path")
         }
@@ -1819,8 +1785,101 @@ class MediaLibraryBuilder {
         }
     }
     
+    static func deletePlaylist(db: OpaquePointer?, containerPid: Int64) throws {
+        var stmt: OpaquePointer?
+        
+        let deleteItems = "DELETE FROM container_item WHERE container_pid = ?"
+        if sqlite3_prepare_v2(db, deleteItems, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_int64(stmt, 1, containerPid)
+            sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
+        
+        let deleteContainer = "DELETE FROM container WHERE container_pid = ?"
+        if sqlite3_prepare_v2(db, deleteContainer, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_int64(stmt, 1, containerPid)
+            if sqlite3_step(stmt) != SQLITE_DONE {
+                let error = String(cString: sqlite3_errmsg(db))
+                throw MediaLibraryError.insertFailed("Failed to delete playlist: \(error)")
+            }
+        }
+        sqlite3_finalize(stmt)
+        Logger.shared.log("[MediaLibraryBuilder] Deleted playlist \(containerPid)")
+    }
     
+    static func renamePlaylist(db: OpaquePointer?, containerPid: Int64, newName: String) throws {
+        let updateSQL = "UPDATE container SET name = ?, date_modified = ? WHERE container_pid = ?"
+        var stmt: OpaquePointer?
+        
+        if sqlite3_prepare_v2(db, updateSQL, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_text(stmt, 1, newName, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_int64(stmt, 2, Int64(Date().timeIntervalSinceReferenceDate))
+            sqlite3_bind_int64(stmt, 3, containerPid)
+            
+            if sqlite3_step(stmt) != SQLITE_DONE {
+                let error = String(cString: sqlite3_errmsg(db))
+                sqlite3_finalize(stmt)
+                throw MediaLibraryError.insertFailed("Failed to rename playlist: \(error)")
+            }
+        }
+        sqlite3_finalize(stmt)
+        Logger.shared.log("[MediaLibraryBuilder] Renamed playlist \(containerPid) to '\(newName)'")
+    }
     
+    static func removeSongFromPlaylist(db: OpaquePointer?, containerPid: Int64, itemPid: Int64) throws {
+        let getSQL = "SELECT container_item_pid FROM container_item WHERE container_pid = ? AND item_pid = ? LIMIT 1"
+        var stmt: OpaquePointer?
+        var targetItemPid: Int64?
+        
+        if sqlite3_prepare_v2(db, getSQL, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_int64(stmt, 1, containerPid)
+            sqlite3_bind_int64(stmt, 2, itemPid)
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                targetItemPid = sqlite3_column_int64(stmt, 0)
+            }
+        }
+        sqlite3_finalize(stmt)
+        
+        guard let idToDelete = targetItemPid else { return }
+        
+        let deleteSQL = "DELETE FROM container_item WHERE container_item_pid = ?"
+        if sqlite3_prepare_v2(db, deleteSQL, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_int64(stmt, 1, idToDelete)
+            sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
+        Logger.shared.log("[MediaLibraryBuilder] Removed song \(itemPid) from playlist \(containerPid)")
+    }
+    
+    static func reorderSongsInPlaylist(db: OpaquePointer?, containerPid: Int64, orderedItemPids: [Int64]) throws {
+        var stmt: OpaquePointer?
+        
+        let getSQL = "SELECT container_item_pid, item_pid FROM container_item WHERE container_pid = ?"
+        var currentItems: [Int64: Int64] = [:] 
+        
+        if sqlite3_prepare_v2(db, getSQL, -1, &stmt, nil) == SQLITE_OK {
+            sqlite3_bind_int64(stmt, 1, containerPid)
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let ciPid = sqlite3_column_int64(stmt, 0)
+                let iPid = sqlite3_column_int64(stmt, 1)
+                currentItems[iPid] = ciPid
+            }
+        }
+        sqlite3_finalize(stmt)
+        
+        let updateSQL = "UPDATE container_item SET position = ? WHERE container_item_pid = ?"
+        if sqlite3_prepare_v2(db, updateSQL, -1, &stmt, nil) == SQLITE_OK {
+            for (index, itemPid) in orderedItemPids.enumerated() {
+                guard let ciPid = currentItems[itemPid] else { continue }
+                sqlite3_bind_int64(stmt, 1, Int64(index))
+                sqlite3_bind_int64(stmt, 2, ciPid)
+                sqlite3_step(stmt)
+                sqlite3_reset(stmt)
+            }
+        }
+        sqlite3_finalize(stmt)
+        Logger.shared.log("[MediaLibraryBuilder] Reordered \(orderedItemPids.count) songs in playlist \(containerPid)")
+    }
     
     static func addRingtonesToExistingDatabase(
         existingDbData: Data,
@@ -2001,7 +2060,6 @@ class MediaLibraryBuilder {
             return fallbackColorAnalysisJSON()
         }
 
-        // User-set custom color takes top priority over everything else.
         if let customHex = song.customAlbumBackgroundColor,
            let background = rgbColor(from: customHex) {
             let backgroundLight = relativeLuminance(red: background.r, green: background.g, blue: background.b) > 0.62

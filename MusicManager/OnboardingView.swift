@@ -27,7 +27,6 @@ struct OnboardingView: View {
             VStack(spacing: 0) {
                 Spacer()
 
-                // App icon + wordmark
                 VStack(spacing: 16) {
                     Image("AppIconImage")
                         .resizable()
@@ -59,7 +58,6 @@ struct OnboardingView: View {
 
                 Spacer()
 
-                // Connect card
                 connectCard
                     .offset(y: animateContent ? 0 : 50)
                     .opacity(animateContent ? 1 : 0)
@@ -101,7 +99,6 @@ struct OnboardingView: View {
     }
 
     // MARK: - Connect Card
-
     @ViewBuilder
     private var connectCard: some View {
         VStack(spacing: 22) {
@@ -197,7 +194,6 @@ struct OnboardingView: View {
     }
 
     // MARK: - Pairing Import
-
     func handlePairingImport(url: URL?) {
         guard let url = url else { return }
         do {

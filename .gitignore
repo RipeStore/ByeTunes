@@ -1,5 +1,6 @@
 # Xcode
 .DS_Store
+.tmp/
 *.swp
 *.lock
 *~
@@ -28,4 +29,3 @@ MusicManager/Bridging-Header.h
 
 # Local Secrets / Configurations
 MusicManager/Config.plist
-

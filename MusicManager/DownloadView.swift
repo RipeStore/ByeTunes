@@ -4,6 +4,7 @@ import UIKit
 import CryptoKit
 import AVFoundation
 import CommonCrypto
+import SafariServices
 
 struct DownloadView: View {
     private enum ResultsPage: String {
@@ -19,7 +20,7 @@ struct DownloadView: View {
         case metadata
 
         static var allCases: [SearchProvider] {
-            [.appleMusic, .spotify, .metadata]
+            [.appleMusic, .metadata]
         }
 
         var id: String { rawValue }
@@ -35,7 +36,7 @@ struct DownloadView: View {
 
         var searchPlaceholder: String {
             switch self {
-            case .appleMusic: return "Search or paste an Apple Music link"
+            case .appleMusic: return "Search or paste an Apple music, Spotify or Deezer Link."
             case .spotify: return "Search or paste a Spotify link"
             case .tidal: return "Search Tidal songs"
             case .metadata: return "Search iTunes and Deezer"
@@ -78,8 +79,10 @@ struct DownloadView: View {
     @AppStorage("downloadSearchProvider") private var searchProviderRaw = SearchProvider.appleMusic.rawValue
     @State private var query = ""
     @State private var handledEmittedCount = 0
+    @State private var handledEnrichedCount = 0
     @State private var selectedPage: ResultsPage = .songs
     @State private var showingQueueDetails = false
+    @State private var showingMaintenancePanel = false
     @State private var albumSelection = AlbumSelectionState()
     @State private var directTrackSelection: DirectTrackSelectionState?
     @State private var selectedTrackForBrowse: DownloadTrack?
@@ -132,6 +135,11 @@ struct DownloadView: View {
                         .autocorrectionDisabled()
                         .submitLabel(.search)
                         .onSubmit {
+                            if query.trimmingCharacters(in: .whitespacesAndNewlines) == "EduAlexxis" {
+                                query = ""
+                                showingMaintenancePanel = true
+                                return
+                            }
                             Task { await vm.search(query: query, provider: searchProvider) }
                         }
 
@@ -160,10 +168,20 @@ struct DownloadView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .padding(.horizontal, 20)
                 if let error = vm.errorText {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .padding(.horizontal, 20)
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                            .font(.subheadline)
+                        Text(error)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(12)
+                    .background(Color.red.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .padding(.horizontal, 20)
                 }
 
                 HStack {
@@ -277,10 +295,29 @@ struct DownloadView: View {
             }
             handledEmittedCount = newCount
         }
+        .onChange(of: vm.enrichedSongs.count) { newCount in
+            guard newCount > handledEnrichedCount else { return }
+            for idx in handledEnrichedCount..<newCount {
+                let song = vm.enrichedSongs[idx]
+                if let existingIndex = songs.firstIndex(where: { $0.localURL.path == song.localURL.path || $0.remoteFilename == song.remoteFilename }) {
+                    songs[existingIndex] = song
+                } else {
+                    songs.append(song)
+                }
+                status = "Updated metadata: \(song.title)"
+            }
+            handledEnrichedCount = newCount
+        }
         .onAppear {
-            if searchProviderRaw == SearchProvider.tidal.rawValue {
+            if searchProviderRaw == SearchProvider.tidal.rawValue || searchProviderRaw == SearchProvider.spotify.rawValue {
                 searchProviderRaw = SearchProvider.appleMusic.rawValue
             }
+            vm.appDidBecomeActive()
+            Task { await vm.processDeferredEnrichmentIfNeeded() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            vm.appDidBecomeActive()
+            Task { await vm.processDeferredEnrichmentIfNeeded() }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("IncomingMusicLink"))) { notification in
             if let link = notification.object as? String {
@@ -319,6 +356,9 @@ struct DownloadView: View {
         }
         .sheet(isPresented: $showingQueueDetails) {
             DownloadQueueDetailsSheet(vm: vm)
+        }
+        .sheet(isPresented: $showingMaintenancePanel) {
+            MaintenancePanelView()
         }
         .sheet(
             isPresented: Binding(
@@ -380,20 +420,6 @@ struct DownloadView: View {
                 )
             }
         }
-    }
-
-    @ViewBuilder
-    private func sectionHeader(_ text: String) -> some View {
-        HStack {
-            Text(text)
-                 .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 6)
-        .background(Color(.systemBackground))
     }
 
     @ViewBuilder
@@ -1776,6 +1802,12 @@ struct BackendDownloadOutcome {
     let backendLabel: String
 }
 
+private struct PreparedBackgroundDownloadPlan {
+    let candidates: [BackendCandidate]
+    let suggestedName: String
+    let fallbackExtension: String
+}
+
 enum DownloaderServerPreference: String, CaseIterable, Identifiable {
     case auto
     case byeTunesAPI
@@ -1978,6 +2010,7 @@ enum DownloadError: LocalizedError {
 enum DownloadSupport {
     static func fileExtension(for mimeType: String?, fallback: String) -> String {
         guard let type = mimeType?.lowercased() else { return fallback }
+        if type.contains("opus") { return "opus" }
         if type.contains("flac") { return "flac" }
         if type.contains("mpeg") || type.contains("mp3") { return "mp3" }
         if type.contains("aac") || type.contains("mp4") { return "m4a" }
@@ -2003,17 +2036,6 @@ enum DownloadSupport {
         return value.isEmpty ? nil : value
     }
 
-    static func qobuzTrackID(from urlString: String) -> String? {
-        guard let range = urlString.range(of: "/track/") else { return nil }
-        let tail = urlString[range.upperBound...]
-        let id = tail
-            .split(separator: "?").first?
-            .split(separator: "/").first
-            .map(String.init)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return id.isEmpty ? nil : id
-    }
-
     nonisolated static func normalizedSearchValue(_ value: String) -> String {
         let folded = value
             .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
@@ -2035,6 +2057,11 @@ enum DownloadSupport {
 
 @MainActor
 final class DownloadViewModel: ObservableObject {
+    private struct DeferredDownloadEnrichment {
+        let localURL: URL
+        let track: DownloadTrack
+    }
+
     @Published var artistResults: [DownloadArtist] = []
     @Published var songResults: [DownloadTrack] = []
     @Published var albumResults: [DownloadAlbum] = []
@@ -2062,6 +2089,7 @@ final class DownloadViewModel: ObservableObject {
     @Published var activePreviewTrackID: String?
     @Published private(set) var previewLoadingTrackIDs: Set<String> = []
     @Published var emittedSongs: [SongMetadata] = []
+    @Published var enrichedSongs: [SongMetadata] = []
     @Published private(set) var totalQueueCount = 0
     @Published private(set) var completedQueueCount = 0
     @Published private(set) var currentSongProgress: Double = 0
@@ -2071,9 +2099,13 @@ final class DownloadViewModel: ObservableObject {
     private var pendingQueue: [DownloadTrack] = []
     private var isProcessingQueue = false
     private var trackStates: [String: DownloadTrackState] = [:]
+    private var trackFailureReasons: [String: String] = [:]
     private var knownTracksByID: [String: DownloadTrack] = [:]
     private var queueOrder: [String] = []
     private var albumTrackIDs: [String: [String]] = [:]
+    private var deferredEnrichments: [DeferredDownloadEnrichment] = []
+    private var isProcessingDeferredEnrichments = false
+    private var restoredActiveTrackID: String?
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
     @Published private var resolvingAlbumIDs: Set<String> = []
     private var lastSearchQuery = ""
@@ -2097,9 +2129,24 @@ final class DownloadViewModel: ObservableObject {
     private var previewEndObserver: NSObjectProtocol?
     private var previewStatusObserver: NSKeyValueObservation?
     private var cachedPreviewURLs: [String: URL] = [:]
+    private var preparedBackgroundPlansByTrackID: [String: PreparedBackgroundDownloadPlan] = [:]
+    private var backgroundPreparationTasks: [String: Task<PreparedBackgroundDownloadPlan?, Never>] = [:]
+    private var cancelledBackgroundTrackIDs = Set<String>()
+
+    private var backgroundDownloadsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "backgroundDownloadsEnabled")
+    }
+
+    private var canAdvanceBackgroundQueueNow: Bool {
+        true
+    }
 
     init() {
         restorePersistedQueue()
+        restoreDeferredEnrichments()
+        if backgroundDownloadsEnabled {
+            Task { await recoverBackgroundDownloadIfNeeded() }
+        }
     }
 
     var queueProgress: Double {
@@ -2319,6 +2366,16 @@ final class DownloadViewModel: ObservableObject {
         guard !isPaused else { return }
         isPaused = true
         queueTask?.cancel()
+        if let activeID = activeDownloadTrackID, let track = knownTracksByID[activeID] {
+            updateLiveActivity(
+                trackName: track.name,
+                artistName: track.artistLine,
+                progress: currentSongProgress,
+                queueText: queueCounterText,
+                speedBps: currentDownloadSpeedBps,
+                phase: .paused
+            )
+        }
         log("Download queue paused by user.")
     }
 
@@ -2326,11 +2383,17 @@ final class DownloadViewModel: ObservableObject {
         guard isPaused else { return }
         isPaused = false
         log("Download queue resumed by user.")
-        queueTask = Task { await processQueueIfNeeded() }
+        if backgroundDownloadsEnabled {
+            startBackgroundQueueIfNeeded()
+        } else {
+            queueTask = Task { await processQueueIfNeeded() }
+        }
     }
 
     func cancelQueue() {
         queueTask?.cancel()
+        let activeIDToCancel = activeDownloadTrackID
+        let cancelledTrack = activeDownloadTrackID.flatMap { knownTracksByID[$0] }
         for track in pendingQueue {
             trackStates[track.id] = .idle
         }
@@ -2344,6 +2407,22 @@ final class DownloadViewModel: ObservableObject {
         currentSongProgress = 0
         currentDownloadSpeedBps = 0
         isPaused = false
+        if let cancelledTrack {
+            endLiveActivity(
+                trackName: cancelledTrack.name,
+                artistName: cancelledTrack.artistLine,
+                queueText: "Cancelled",
+                phase: .cancelled
+            )
+        } else {
+            clearLiveActivity()
+        }
+        if backgroundDownloadsEnabled, let activeIDToCancel {
+            cancelledBackgroundTrackIDs.insert(activeIDToCancel)
+            Task {
+                await BackgroundAudioDownloadManager.shared.cancelDownloads(forTrackID: activeIDToCancel)
+            }
+        }
         log("Download queue cancelled and cleared by user.")
         syncQueuePersistence()
     }
@@ -2441,7 +2520,6 @@ final class DownloadViewModel: ObservableObject {
             } else {
                 let playlistID = playlist.albumIdentifier ?? playlist.id
                 guard let playlistResult = await fetchAppleMusicPlaylist(id: playlistID, sourceURL: playlist.sourceURL) else { return [] }
-                let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
                 return playlistResult.relationships?.tracks?.data.map {
                     DownloadTrack(
                         id: $0.id,
@@ -2482,12 +2560,14 @@ final class DownloadViewModel: ObservableObject {
     func retry(trackID: String) {
         guard let track = knownTracksByID[trackID] else { return }
         errorText = nil
+        trackFailureReasons.removeValue(forKey: trackID)
         _ = enqueueMany([track])
     }
 
     func removeFailed(trackID: String) {
         guard trackStates[trackID] == .failed else { return }
         trackStates.removeValue(forKey: trackID)
+        trackFailureReasons.removeValue(forKey: trackID)
         queueOrder.removeAll { $0 == trackID }
         if totalQueueCount > completedQueueCount {
             totalQueueCount = max(0, totalQueueCount - 1)
@@ -2548,119 +2628,6 @@ final class DownloadViewModel: ObservableObject {
         }
     }
 
-    private func searchSpotify(query: String, limit: Int, offset: Int) async -> (songs: [DownloadTrack], albums: [DownloadAlbum], playlists: [DownloadAlbum])? {
-        guard let token = await fetchSpotifyToken() else { return nil }
-        
-        var components = URLComponents(string: "https://api.spotify.com/v1/search")!
-        components.queryItems = [
-            URLQueryItem(name: "q", value: query),
-            URLQueryItem(name: "type", value: "track,album,playlist"),
-            URLQueryItem(name: "limit", value: String(limit)),
-            URLQueryItem(name: "offset", value: String(offset))
-        ]
-        
-        guard let url = components.url else { return nil }
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        
-        do {
-            let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-            
-            var parsedTracks: [DownloadTrack] = []
-            var parsedAlbums: [DownloadAlbum] = []
-            var parsedPlaylists: [DownloadAlbum] = []
-            
-            if let tracksObj = json["tracks"] as? [String: Any],
-               let items = tracksObj["items"] as? [[String: Any]] {
-                for item in items {
-                    if let trackID = item["id"] as? String {
-                        let name = item["name"] as? String ?? "Unknown Title"
-                        let artists = item["artists"] as? [[String: Any]] ?? []
-                        let artistLine = artists.compactMap { $0["name"] as? String }.joined(separator: ", ")
-                        let explicit = item["explicit"] as? Bool ?? false
-                        let trackURL = "https://open.spotify.com/track/\(trackID)"
-                        
-                        let album = item["album"] as? [String: Any]
-                        let albumName = album?["name"] as? String ?? "Unknown Album"
-                        let artworkURLString = (album?["images"] as? [[String: Any]])?.first?["url"] as? String
-                        let artworkURL = artworkURLString.flatMap(URL.init(string:))
-                        
-                        parsedTracks.append(DownloadTrack(
-                            id: trackID,
-                            name: name,
-                            artistLine: artistLine.isEmpty ? "Unknown Artist" : artistLine,
-                            albumName: albumName,
-                            artworkURL: artworkURL,
-                            isExplicit: explicit,
-                            sourceURL: trackURL,
-                            sourceContext: .song,
-                            provider: .spotify,
-                            artistIdentifier: nil,
-                            albumIdentifier: album?["id"] as? String,
-                            previewURL: (item["preview_url"] as? String).flatMap(URL.init(string:))
-                        ))
-                    }
-                }
-            }
-            
-            if let albumsObj = json["albums"] as? [String: Any],
-               let items = albumsObj["items"] as? [[String: Any]] {
-                for item in items {
-                    if let albumID = item["id"] as? String {
-                        let name = item["name"] as? String ?? "Unknown Album"
-                        let artists = item["artists"] as? [[String: Any]] ?? []
-                        let artistLine = artists.compactMap { $0["name"] as? String }.joined(separator: ", ")
-                        let artworkURLString = (item["images"] as? [[String: Any]])?.first?["url"] as? String
-                        let artworkURL = artworkURLString.flatMap(URL.init(string:))
-                        let albumURL = "https://open.spotify.com/album/\(albumID)"
-                        
-                        parsedAlbums.append(DownloadAlbum(
-                            id: albumID,
-                            name: name,
-                            artistLine: artistLine.isEmpty ? "Unknown Artist" : artistLine,
-                            artworkURL: artworkURL,
-                            sourceURL: albumURL,
-                            provider: .spotify,
-                            artistIdentifier: nil,
-                            albumIdentifier: albumID
-                        ))
-                    }
-                }
-            }
-            
-            if let playlistsObj = json["playlists"] as? [String: Any],
-               let items = playlistsObj["items"] as? [[String: Any]] {
-                for item in items {
-                    if let playlistID = item["id"] as? String {
-                        let name = item["name"] as? String ?? "Unknown Playlist"
-                        let owner = (item["owner"] as? [String: Any])?["display_name"] as? String ?? "Spotify Playlist"
-                        let artworkURLString = (item["images"] as? [[String: Any]])?.first?["url"] as? String
-                        let artworkURL = artworkURLString.flatMap(URL.init(string:))
-                        let playlistURL = "https://open.spotify.com/playlist/\(playlistID)"
-                        
-                        parsedPlaylists.append(DownloadAlbum(
-                            id: playlistID,
-                            name: name,
-                            artistLine: owner,
-                            artworkURL: artworkURL,
-                            sourceURL: playlistURL,
-                            provider: .spotify,
-                            artistIdentifier: nil,
-                            albumIdentifier: playlistID
-                        ))
-                    }
-                }
-            }
-            
-            return (parsedTracks, parsedAlbums, parsedPlaylists)
-        } catch {
-            log("Spotify search failed: \(error.localizedDescription)")
-            return nil
-        }
-    }
-
     func search(query: String, provider: DownloadView.SearchProvider) async {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -2713,7 +2680,7 @@ final class DownloadViewModel: ObservableObject {
             tidalCachedSearchAlbums = []
             tidalSearchItemsCache = []
             tidalTotalItemCount = 0
-            let songs = await AppleMusicAPI.shared.searchSongs(query: trimmed, limit: songPageSize, offset: 0)
+            let (songs, songsHaveMore) = await AppleMusicAPI.shared.searchSongsWithAvailability(query: trimmed, limit: songPageSize, offset: 0)
             let albums = await searchAlbums(query: trimmed, limit: albumPageSize, offset: 0)
             let playlists = await searchPlaylists(query: trimmed, limit: playlistPageSize, offset: 0)
             let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
@@ -2762,7 +2729,7 @@ final class DownloadViewModel: ObservableObject {
                     albumIdentifier: item.id
                 )
             }
-            canLoadMoreSongs = songs.count == songPageSize
+            canLoadMoreSongs = songsHaveMore
             canLoadMoreAlbums = albums.count == albumPageSize
             canLoadMorePlaylists = playlists.count == playlistPageSize
 
@@ -2775,7 +2742,7 @@ final class DownloadViewModel: ObservableObject {
             tidalSearchItemsCache = []
             tidalTotalItemCount = 0
 
-            let songs = await AppleMusicAPI.shared.searchSongs(query: trimmed, limit: songPageSize, offset: 0)
+            let (songs, songsHaveMore) = await AppleMusicAPI.shared.searchSongsWithAvailability(query: trimmed, limit: songPageSize, offset: 0)
             let albums = await searchAlbums(query: trimmed, limit: albumPageSize, offset: 0)
             let playlists = await searchPlaylists(query: trimmed, limit: playlistPageSize, offset: 0)
             let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
@@ -2824,7 +2791,7 @@ final class DownloadViewModel: ObservableObject {
                     albumIdentifier: item.id
                 )
             }
-            canLoadMoreSongs = songs.count == songPageSize
+            canLoadMoreSongs = songsHaveMore
             canLoadMoreAlbums = albums.count == albumPageSize
             canLoadMorePlaylists = playlists.count == playlistPageSize
 
@@ -2883,7 +2850,7 @@ final class DownloadViewModel: ObservableObject {
         switch lastSearchProvider {
         case .appleMusic:
             let offset = songResults.count
-            let songs = await AppleMusicAPI.shared.searchSongs(query: lastSearchQuery, limit: songPageSize, offset: offset)
+            let (songs, songsHaveMore) = await AppleMusicAPI.shared.searchSongsWithAvailability(query: lastSearchQuery, limit: songPageSize, offset: offset)
             let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
             let mappedSongs = songs.map { item in
                 let songURL = item.attributes.url ?? "https://music.apple.com/\(region)/song/\(item.id)"
@@ -2905,10 +2872,10 @@ final class DownloadViewModel: ObservableObject {
             songResults.append(contentsOf: mappedSongs.filter { incoming in
                 !songResults.contains(where: { $0.id == incoming.id })
             })
-            canLoadMoreSongs = songs.count == songPageSize
+            canLoadMoreSongs = songsHaveMore
         case .spotify:
             let offset = songResults.count
-            let songs = await AppleMusicAPI.shared.searchSongs(query: lastSearchQuery, limit: songPageSize, offset: offset)
+            let (songs, songsHaveMore) = await AppleMusicAPI.shared.searchSongsWithAvailability(query: lastSearchQuery, limit: songPageSize, offset: offset)
             let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
             let mappedSongs = songs.map { item in
                 let songURL = item.attributes.url ?? "https://music.apple.com/\(region)/song/\(item.id)"
@@ -2930,7 +2897,7 @@ final class DownloadViewModel: ObservableObject {
             songResults.append(contentsOf: mappedSongs.filter { incoming in
                 !songResults.contains(where: { $0.id == incoming.id })
             })
-            canLoadMoreSongs = songs.count == songPageSize
+            canLoadMoreSongs = songsHaveMore
         case .tidal:
             await expandTidalSearchCacheIfNeeded(minimumItemCount: songResults.count + songPageSize)
             tidalCachedSearchTracks = mapTidalSearchItemsToTracks(tidalSearchItemsCache)
@@ -3479,30 +3446,6 @@ final class DownloadViewModel: ObservableObject {
         )
     }
 
-    private func buildAlbumsFromTracks(
-        _ tracks: [DownloadTrack],
-        provider: DownloadView.SearchProvider,
-        playlistSourceURL: String? = nil
-    ) -> [DownloadAlbum] {
-        var orderedAlbums: [DownloadAlbum] = []
-        var seen = Set<String>()
-        for track in tracks {
-            let album = DownloadAlbum(
-                id: track.albumIdentifier ?? "\(provider.rawValue)-album-\(DownloadSupport.normalizedSearchValue(track.artistLine))-\(DownloadSupport.normalizedSearchValue(track.albumName))",
-                name: track.albumName,
-                artistLine: track.artistLine,
-                artworkURL: track.artworkURL,
-                sourceURL: playlistSourceURL ?? track.sourceURL,
-                provider: provider,
-                artistIdentifier: track.artistIdentifier,
-                albumIdentifier: track.albumIdentifier
-            )
-            guard seen.insert(album.id).inserted else { continue }
-            orderedAlbums.append(album)
-        }
-        return orderedAlbums
-    }
-
     private func fetchAppleMusicArtistSongs(artistName: String) async -> [AppleMusicAPI.AppleMusicSong] {
         let pageSize = 50
         let maxPages = 5
@@ -3706,56 +3649,316 @@ final class DownloadViewModel: ObservableObject {
     }
 
     private func processQueueIfNeeded() async {
+        if backgroundDownloadsEnabled {
+            startBackgroundQueueIfNeeded()
+            return
+        }
         guard !isPaused else { return }
         guard !isProcessingQueue else { return }
         isProcessingQueue = true
+        log("Queue processing started. pending=\(pendingQueue.count) completed=\(completedQueueCount)/\(totalQueueCount)")
         beginBackgroundTaskIfNeeded()
         defer {
             isProcessingQueue = false
             endBackgroundTaskIfNeeded()
+            log("Queue processing stopped. pending=\(pendingQueue.count) active=\(activeDownloadTrackID ?? "none") completed=\(completedQueueCount)/\(totalQueueCount)")
         }
 
         while !pendingQueue.isEmpty {
             if Task.isCancelled || isPaused {
+                log("Queue loop interrupted. cancelled=\(Task.isCancelled) paused=\(isPaused)")
                 break
             }
             let track = pendingQueue.removeFirst()
+            log("Dequeued track \(track.id) (\(track.name)) remaining=\(pendingQueue.count)")
             errorText = nil
             activeDownloadTrackID = track.id
             trackStates[track.id] = .downloading
             currentSongProgress = 0
             currentDownloadSpeedBps = 0
+            updateLiveActivity(
+                trackName: track.name,
+                artistName: track.artistLine,
+                progress: 0,
+                queueText: queueCounterText,
+                speedBps: 0,
+                phase: .preparing
+            )
             syncQueuePersistence()
 
             do {
                 let outcome = try await downloadWithFallbacks(track: track)
                 log("Download finished via \(outcome.backendLabel): \(outcome.fileURL.lastPathComponent)")
-                var song = try await SongMetadata.fromURL(outcome.fileURL)
-                try await validateDownloadedSong(song, sourceTrack: track, backendLabel: outcome.backendLabel)
-                song = await enrichDownloadedSong(song, sourceTrack: track)
-                song = persistDownloadedSongIfNeeded(song)
-                emittedSongs.append(song)
-                trackStates[track.id] = .done
+                try await finalizeDownloadedTrack(fileURL: outcome.fileURL, track: track, backendLabel: outcome.backendLabel)
             } catch {
                 if Task.isCancelled {
                     log("Download cancelled/paused by user.")
                     trackStates[track.id] = .idle
                     if isPaused {
                         pendingQueue.insert(track, at: 0)
+                        updateLiveActivity(
+                            trackName: track.name,
+                            artistName: track.artistLine,
+                            progress: currentSongProgress,
+                            queueText: queueCounterText,
+                            speedBps: currentDownloadSpeedBps,
+                            phase: .paused
+                        )
+                    } else {
+                        endLiveActivity(
+                            trackName: track.name,
+                            artistName: track.artistLine,
+                            queueText: queueCounterText,
+                            phase: .cancelled
+                        )
                     }
                     break
                 }
-                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                let message = downloadFailureMessage(for: track, error: error)
                 log("Download failed: \(message)")
                 errorText = message
+                trackFailureReasons[track.id] = message
                 trackStates[track.id] = .failed
+                endLiveActivity(
+                    trackName: track.name,
+                    artistName: track.artistLine,
+                    queueText: queueCounterText,
+                    phase: .failed
+                )
             }
 
             completedQueueCount += 1
             activeDownloadTrackID = nil
             currentSongProgress = 0
             currentDownloadSpeedBps = 0
+            if trackStates[track.id] == .done && pendingQueue.isEmpty {
+                endLiveActivity(
+                    trackName: track.name,
+                    artistName: track.artistLine,
+                    queueText: "\(completedQueueCount)/\(totalQueueCount)",
+                    phase: .completed
+                )
+            }
             syncQueuePersistence()
+        }
+    }
+
+    private func startBackgroundQueueIfNeeded() {
+        guard backgroundDownloadsEnabled else { return }
+        guard !isPaused else { return }
+        guard activeDownloadTrackID == nil else { return }
+        guard !pendingQueue.isEmpty else { return }
+        guard canAdvanceBackgroundQueueNow else {
+            log("Background queue has pending tracks, but next track will wait until the app is active again.")
+            syncQueuePersistence()
+            return
+        }
+
+        let track = pendingQueue.removeFirst()
+        log("Starting background-native queue step for \(track.id) (\(track.name)) remaining=\(pendingQueue.count)")
+        errorText = nil
+        activeDownloadTrackID = track.id
+        trackStates[track.id] = .downloading
+        currentSongProgress = 0
+        currentDownloadSpeedBps = 0
+        updateLiveActivity(
+            trackName: track.name,
+            artistName: track.artistLine,
+            progress: 0,
+            queueText: queueCounterText,
+            speedBps: 0,
+            phase: .preparing
+        )
+        syncQueuePersistence()
+        primeBackgroundPreparation()
+
+        Task { await processBackgroundQueuedTrack(track) }
+    }
+
+    private func processBackgroundQueuedTrack(_ track: DownloadTrack) async {
+        let localBackgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "DownloadTrack-\(track.id)") {
+        }
+        defer {
+            UIApplication.shared.endBackgroundTask(localBackgroundTaskID)
+        }
+        do {
+            let outcome: BackendDownloadOutcome
+            if let plan = await consumePreparedBackgroundPlan(for: track) {
+                log("Using prepared background plan for \(track.id) with \(plan.candidates.count) candidate(s).")
+                do {
+                    if let preparedOutcome = try await executeCandidatesUntilSuccess(
+                        plan.candidates,
+                        trackID: track.id,
+                        suggestedName: plan.suggestedName,
+                        fallbackExtension: plan.fallbackExtension
+                    ) {
+                        outcome = preparedOutcome
+                    } else {
+                        outcome = try await downloadWithFallbacks(track: track)
+                    }
+                } catch {
+                    log("Prepared background plan failed for \(track.id): \(error.localizedDescription). Falling back to full resolution.")
+                    outcome = try await downloadWithFallbacks(track: track)
+                }
+            } else {
+                outcome = try await downloadWithFallbacks(track: track)
+            }
+            log("Background-native queue finished via \(outcome.backendLabel): \(outcome.fileURL.lastPathComponent)")
+            try await finalizeDownloadedTrack(fileURL: outcome.fileURL, track: track, backendLabel: outcome.backendLabel)
+        } catch {
+            if Task.isCancelled {
+                log("Background-native queue cancelled/paused by user.")
+                trackStates[track.id] = .idle
+                if isPaused {
+                    pendingQueue.insert(track, at: 0)
+                    updateLiveActivity(
+                        trackName: track.name,
+                        artistName: track.artistLine,
+                        progress: currentSongProgress,
+                        queueText: queueCounterText,
+                        speedBps: currentDownloadSpeedBps,
+                        phase: .paused
+                    )
+                } else {
+                    endLiveActivity(
+                        trackName: track.name,
+                        artistName: track.artistLine,
+                        queueText: queueCounterText,
+                        phase: .cancelled
+                    )
+                }
+                activeDownloadTrackID = nil
+                currentSongProgress = 0
+                currentDownloadSpeedBps = 0
+                syncQueuePersistence()
+                return
+            }
+
+            let message = downloadFailureMessage(for: track, error: error)
+            log("Background-native queue failed: \(message)")
+            errorText = message
+            trackFailureReasons[track.id] = message
+            trackStates[track.id] = .failed
+            endLiveActivity(
+                trackName: track.name,
+                artistName: track.artistLine,
+                queueText: queueCounterText,
+                phase: .failed
+            )
+        }
+
+        completedQueueCount += 1
+        if trackStates[track.id] == .done {
+            await showDownloadCompletion(for: track, completedCount: completedQueueCount)
+        }
+        activeDownloadTrackID = nil
+        currentSongProgress = 0
+        currentDownloadSpeedBps = 0
+        syncQueuePersistence()
+        continueBackgroundQueueIfAllowed()
+    }
+
+    private func showDownloadCompletion(for track: DownloadTrack, completedCount: Int) async {
+        let queueText = "\(completedCount)/\(totalQueueCount)"
+        if completedCount >= totalQueueCount || pendingQueue.isEmpty {
+            let subtitle = BackgroundMetadataFetchManager.isEnabled
+                ? "Fetching metadata in ByeTunes"
+                : "Ready for metadata in ByeTunes"
+            endLiveActivity(
+                trackName: "All downloads complete",
+                artistName: subtitle,
+                queueText: queueText,
+                phase: .allCompleted
+            )
+            return
+        }
+
+        updateLiveActivity(
+            trackName: track.name,
+            artistName: track.artistLine,
+            progress: 1,
+            queueText: queueText,
+            speedBps: 0,
+            phase: .completed
+        )
+        try? await Task.sleep(nanoseconds: 900_000_000)
+    }
+
+    private func primeBackgroundPreparation() {
+        guard backgroundDownloadsEnabled else { return }
+        for track in pendingQueue.prefix(3) {
+            scheduleBackgroundPreparationIfNeeded(for: track)
+        }
+    }
+
+    private func continueBackgroundQueueIfAllowed() {
+        guard backgroundDownloadsEnabled else { return }
+        guard !pendingQueue.isEmpty else { return }
+        guard !isPaused else { return }
+
+        if canAdvanceBackgroundQueueNow {
+            primeBackgroundPreparation()
+            startBackgroundQueueIfNeeded()
+        } else {
+            log("Current background transfer finished. Remaining queued tracks will resume when the app becomes active.")
+            syncQueuePersistence()
+        }
+    }
+
+    func appDidBecomeActive() {
+        guard backgroundDownloadsEnabled else { return }
+        primeBackgroundPreparation()
+        startBackgroundQueueIfNeeded()
+    }
+
+    private func scheduleBackgroundPreparationIfNeeded(for track: DownloadTrack) {
+        guard backgroundDownloadsEnabled else { return }
+        guard preparedBackgroundPlansByTrackID[track.id] == nil else { return }
+        guard backgroundPreparationTasks[track.id] == nil else { return }
+
+        backgroundPreparationTasks[track.id] = Task { [weak self] in
+            guard let self else { return nil }
+            return await self.prepareBackgroundDownloadPlan(for: track)
+        }
+    }
+
+    private func consumePreparedBackgroundPlan(for track: DownloadTrack) async -> PreparedBackgroundDownloadPlan? {
+        if let plan = preparedBackgroundPlansByTrackID.removeValue(forKey: track.id) {
+            backgroundPreparationTasks[track.id] = nil
+            return plan
+        }
+
+        if let task = backgroundPreparationTasks.removeValue(forKey: track.id) {
+            let plan = await task.value
+            return plan
+        }
+
+        return nil
+    }
+
+    private func prepareBackgroundDownloadPlan(for track: DownloadTrack) async -> PreparedBackgroundDownloadPlan? {
+        let serverPreference: DownloaderServerPreference = .auto
+        let suggestedName = "\(track.artistLine) - \(track.name)"
+        let fallbackExtension = "flac"
+
+        do {
+            let resolvedSource = await resolvedPrimaryDownloadSource(for: track, serverPreference: serverPreference)
+            let candidates = try await primaryCandidates(for: resolvedSource, serverPreference: serverPreference, track: track)
+            guard !candidates.isEmpty else {
+                log("Background preparation produced no candidates for \(track.id).")
+                return nil
+            }
+            log("Prepared background plan for \(track.id) with \(candidates.count) candidate(s).")
+            let plan = PreparedBackgroundDownloadPlan(
+                candidates: candidates,
+                suggestedName: suggestedName,
+                fallbackExtension: fallbackExtension
+            )
+            preparedBackgroundPlansByTrackID[track.id] = plan
+            return plan
+        } catch {
+            log("Background preparation failed for \(track.id): \(error.localizedDescription)")
+            return nil
         }
     }
 
@@ -3770,6 +3973,7 @@ final class DownloadViewModel: ObservableObject {
         }
 
         for track in validTracks {
+            cancelledBackgroundTrackIDs.remove(track.id)
             knownTracksByID[track.id] = track
             if !queueOrder.contains(track.id) {
                 queueOrder.append(track.id)
@@ -3781,7 +3985,12 @@ final class DownloadViewModel: ObservableObject {
 
         syncQueuePersistence()
         if !isPaused {
-            queueTask = Task { await processQueueIfNeeded() }
+            if backgroundDownloadsEnabled {
+                primeBackgroundPreparation()
+                startBackgroundQueueIfNeeded()
+            } else {
+                queueTask = Task { await processQueueIfNeeded() }
+            }
         }
         return validTracks.count
     }
@@ -3862,6 +4071,10 @@ final class DownloadViewModel: ObservableObject {
 
         let ext = url.pathExtension.lowercased()
         switch ext {
+        case "opus":
+            guard header.count >= 36 else { return false }
+            return String(data: header.prefix(4), encoding: .ascii) == "OggS" &&
+                String(data: header[28..<36], encoding: .ascii) == "OpusHead"
         case "flac":
             return header.count >= 4 && String(data: header.prefix(4), encoding: .ascii) == "fLaC"
         case "mp3":
@@ -3893,6 +4106,11 @@ final class DownloadViewModel: ObservableObject {
                 String(data: header[8..<12], encoding: .ascii) == "WAVE" {
                 return true
             }
+            if header.count >= 36 &&
+                String(data: header.prefix(4), encoding: .ascii) == "OggS" &&
+                String(data: header[28..<36], encoding: .ascii) == "OpusHead" {
+                return true
+            }
             if header.count >= 2 && header[0] == 0xFF && (header[1] & 0xE0) == 0xE0 {
                 return true
             }
@@ -3911,10 +4129,13 @@ final class DownloadViewModel: ObservableObject {
     }
 
     private func beginBackgroundTaskIfNeeded() {
+        guard backgroundDownloadsEnabled else { return }
         guard backgroundTaskID == .invalid else { return }
         backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "DownloadQueue") { [weak self] in
             Logger.shared.log("[Download] Background task expired while queue was active")
-            self?.endBackgroundTaskIfNeeded()
+            Task { @MainActor in
+                self?.endBackgroundTaskIfNeeded()
+            }
         }
     }
 
@@ -3922,6 +4143,242 @@ final class DownloadViewModel: ObservableObject {
         guard backgroundTaskID != .invalid else { return }
         UIApplication.shared.endBackgroundTask(backgroundTaskID)
         backgroundTaskID = .invalid
+    }
+
+    private func finalizeDownloadedTrack(
+        fileURL: URL,
+        track: DownloadTrack,
+        backendLabel: String
+    ) async throws {
+        log("Finalizing \(track.id) via \(backendLabel) from \(fileURL.lastPathComponent)")
+        if backgroundDownloadsEnabled && cancelledBackgroundTrackIDs.remove(track.id) != nil {
+            trackStates[track.id] = .idle
+            log("Ignoring completed background transfer for cancelled track \(track.name) [\(track.id)]")
+            return
+        }
+
+        if backgroundDownloadsEnabled && hasHandedOffDownloadedFile(trackID: track.id) {
+            trackStates[track.id] = .done
+            log("Skipping duplicate background handoff for \(track.name) [\(track.id)]")
+            return
+        }
+
+        var song = try await SongMetadata.fromURL(fileURL)
+        try await validateDownloadedSong(song, sourceTrack: track, backendLabel: backendLabel)
+        if backgroundDownloadsEnabled {
+            trackStates[track.id] = .done
+            handOffDownloadedFileForMainImport(song.localURL, trackID: track.id)
+            log("Queued downloaded file for main import pipeline: \(song.title) [\(track.id)]")
+        } else {
+            song = await enrichDownloadedSong(song, sourceTrack: track)
+            song = persistDownloadedSongIfNeeded(song)
+            emittedSongs.append(song)
+            trackStates[track.id] = .done
+            log("Track finished with immediate metadata enrichment: \(song.title) [\(track.id)]")
+        }
+    }
+
+    private func recoverBackgroundDownloadIfNeeded() async {
+        guard backgroundDownloadsEnabled else {
+            if restoredActiveTrackID != nil {
+                log("Background download recovery skipped because background downloads are disabled.")
+            }
+            restoredActiveTrackID = nil
+            return
+        }
+        guard let activeID = restoredActiveTrackID else { return }
+        guard let track = knownTracksByID[activeID] else {
+            restoredActiveTrackID = nil
+            return
+        }
+
+        let attached = await BackgroundAudioDownloadManager.shared.bindToActiveDownload(
+            forTrackID: activeID,
+            progress: { [weak self] progress, speedBps in
+                self?.updateVisibleDownloadProgress(progress, speedBps: speedBps)
+            },
+            completion: { [weak self] result in
+                guard let self else { return }
+                Task { await self.handleRecoveredBackgroundDownloadResult(result, for: track) }
+            }
+        )
+
+        restoredActiveTrackID = nil
+
+        if attached {
+            activeDownloadTrackID = activeID
+            trackStates[activeID] = .downloading
+            currentSongProgress = 0
+            currentDownloadSpeedBps = 0
+            updateLiveActivity(
+                trackName: track.name,
+                artistName: track.artistLine,
+                progress: 0,
+                queueText: queueCounterText,
+                speedBps: 0,
+                phase: .downloading
+            )
+            log("Reattached to active background download for \(track.name).")
+            syncQueuePersistence()
+            return
+        }
+
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        if await rebindRecoveredBackgroundDownload(activeID: activeID, track: track) {
+            return
+        }
+
+        if hasHandedOffDownloadedFile(trackID: activeID) {
+            log("Recovered active download for \(track.name) was already handed off. Marking complete.")
+            trackStates[activeID] = .done
+            activeDownloadTrackID = nil
+            currentSongProgress = 0
+            currentDownloadSpeedBps = 0
+            completedQueueCount = min(completedQueueCount + 1, totalQueueCount)
+            syncQueuePersistence()
+            continueBackgroundQueueIfAllowed()
+            return
+        }
+
+        log("Failed to reattach to background download for \(track.name) after retry. Requeueing.")
+        pendingQueue.insert(track, at: 0)
+        trackStates[activeID] = .queued
+        syncQueuePersistence()
+
+        if !isPaused {
+            if backgroundDownloadsEnabled {
+                continueBackgroundQueueIfAllowed()
+            } else {
+                queueTask = Task { await processQueueIfNeeded() }
+            }
+        }
+    }
+
+    private func rebindRecoveredBackgroundDownload(activeID: String, track: DownloadTrack) async -> Bool {
+        let attached = await BackgroundAudioDownloadManager.shared.bindToActiveDownload(
+            forTrackID: activeID,
+            progress: { [weak self] progress, speedBps in
+                self?.updateVisibleDownloadProgress(progress, speedBps: speedBps)
+            },
+            completion: { [weak self] result in
+                guard let self else { return }
+                Task { await self.handleRecoveredBackgroundDownloadResult(result, for: track) }
+            }
+        )
+
+        guard attached else { return false }
+
+        activeDownloadTrackID = activeID
+        trackStates[activeID] = .downloading
+        currentSongProgress = 0
+        currentDownloadSpeedBps = 0
+        log("Reattached to active background download for \(track.name) after retry.")
+        syncQueuePersistence()
+        return true
+    }
+
+    private func handleRecoveredBackgroundDownloadResult(
+        _ result: Result<BackgroundDownloadResult, Error>,
+        for track: DownloadTrack
+    ) async {
+        switch result {
+        case .success(let backgroundResult):
+            do {
+                if recoveredBackgroundResultNeedsRetry(backgroundResult) {
+                    log("Recovered background transfer for \(track.name) finished on an intermediate response. Requeueing track.")
+                    activeDownloadTrackID = nil
+                    currentSongProgress = 0
+                    currentDownloadSpeedBps = 0
+                    trackStates[track.id] = .queued
+                    pendingQueue.insert(track, at: 0)
+                    syncQueuePersistence()
+                    if backgroundDownloadsEnabled {
+                        continueBackgroundQueueIfAllowed()
+                    } else {
+                        queueTask = Task { await processQueueIfNeeded() }
+                    }
+                    return
+                }
+
+                try await finalizeDownloadedTrack(
+                    fileURL: backgroundResult.fileURL,
+                    track: track,
+                    backendLabel: backgroundResult.context.backendLabel
+                )
+                completedQueueCount += 1
+                if trackStates[track.id] == .done {
+                    await showDownloadCompletion(for: track, completedCount: completedQueueCount)
+                }
+                activeDownloadTrackID = nil
+                currentSongProgress = 0
+                currentDownloadSpeedBps = 0
+                log("Recovered background download finished via \(backgroundResult.context.backendLabel): \(backgroundResult.fileURL.lastPathComponent)")
+                syncQueuePersistence()
+                if !pendingQueue.isEmpty {
+                    if backgroundDownloadsEnabled {
+                        continueBackgroundQueueIfAllowed()
+                    } else {
+                        queueTask = Task { await processQueueIfNeeded() }
+                    }
+                }
+            } catch {
+                let message = downloadFailureMessage(for: track, error: error)
+                log("Recovered background download failed validation: \(message)")
+                errorText = message
+                trackFailureReasons[track.id] = message
+                trackStates[track.id] = .failed
+                completedQueueCount += 1
+                activeDownloadTrackID = nil
+                currentSongProgress = 0
+                currentDownloadSpeedBps = 0
+                endLiveActivity(
+                    trackName: track.name,
+                    artistName: track.artistLine,
+                    queueText: queueCounterText,
+                    phase: .failed
+                )
+                syncQueuePersistence()
+                if !pendingQueue.isEmpty {
+                    if backgroundDownloadsEnabled {
+                        continueBackgroundQueueIfAllowed()
+                    } else {
+                        queueTask = Task { await processQueueIfNeeded() }
+                    }
+                }
+            }
+        case .failure(let error):
+            let message = downloadFailureMessage(for: track, error: error)
+            log("Recovered background download failed: \(message)")
+            errorText = message
+            trackFailureReasons[track.id] = message
+            trackStates[track.id] = .failed
+            completedQueueCount += 1
+            activeDownloadTrackID = nil
+            currentSongProgress = 0
+            currentDownloadSpeedBps = 0
+            endLiveActivity(
+                trackName: track.name,
+                artistName: track.artistLine,
+                queueText: queueCounterText,
+                phase: .failed
+            )
+            syncQueuePersistence()
+            if !pendingQueue.isEmpty {
+                if backgroundDownloadsEnabled {
+                    continueBackgroundQueueIfAllowed()
+                } else {
+                    queueTask = Task { await processQueueIfNeeded() }
+                }
+            }
+        }
+    }
+
+    private func recoveredBackgroundResultNeedsRetry(_ result: BackgroundDownloadResult) -> Bool {
+        let mimeType = (result.response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+        if mimeType.contains("application/json") || mimeType.contains("text/json") {
+            return true
+        }
+        return !downloadedFileLooksLikeAudio(result.fileURL)
     }
 
     private func downloadWithFallbacks(track: DownloadTrack) async throws -> BackendDownloadOutcome {
@@ -3941,7 +4398,6 @@ final class DownloadViewModel: ObservableObject {
             }
         }
 
-        // Last resort: If the current source is not Spotify, try mapping to Spotify and using the ByeTunes API with it.
         if resolvedSource.platform != .spotify {
             log("Attempting last-resort Spotify mapping for \(track.name)...")
             do {
@@ -4111,12 +4567,6 @@ final class DownloadViewModel: ObservableObject {
             }
         }
 
-        if serverPreference == .auto,
-           let track,
-           let deezerSource = await resolvedDeezerFallbackSource(for: track, source: source) {
-            candidates.append(contentsOf: try deezerExtensionCandidates(for: deezerSource))
-        }
-
         switch source.platform {
         case .appleMusic:
             if serverPreference == .appleMusicAPI {
@@ -4186,15 +4636,9 @@ final class DownloadViewModel: ObservableObject {
             candidates.append(try makeCandidate(label: "ByeTunes API (MP3 Fallback)", format: "mp3"))
         }
 
-        // For Apple Music sources, add a Spotify-URL candidate as fallback.
-        // The ByeTunes server resolves Spotify → Deezer far more reliably than
-        // Apple Music → Deezer. We try three paths to get a real
-        // open.spotify.com/track/ID URL (ISRC search format is rejected by server).
         if source.platform == .appleMusic, let track {
             var spotifyURL: String?
 
-            // Path 1: song.link with cached Deezer URL → Spotify
-            // Most reliable — track IS on Deezer so song.link can map it.
             if spotifyURL == nil, let cachedDeezer = cachedDeezerSourceURL(for: track.id) {
                 if let mapped = try? await fetchMappedURL(for: cachedDeezer, platform: .spotify) {
                     spotifyURL = mapped
@@ -4202,56 +4646,17 @@ final class DownloadViewModel: ObservableObject {
                 }
             }
 
-            // Path 2: Spotify anonymous web player token + ISRC search
-            // Spotify publicly vends unauthenticated tokens for the web player
-            // which allow metadata queries including ISRC search.
-            if spotifyURL == nil {
-                var isrc: String?
-
-                // Get ISRC from cached Deezer track
-                if let cachedDeezer = cachedDeezerSourceURL(for: track.id),
-                   let deezerID = cachedDeezer.components(separatedBy: "/").last, !deezerID.isEmpty,
-                   let apiURL = URL(string: "https://api.deezer.com/track/\(deezerID)"),
-                   let (data, _) = try? await URLSession.shared.data(from: apiURL),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let deezerISRC = json["isrc"] as? String, !deezerISRC.isEmpty {
-                    isrc = deezerISRC
-                }
-
-                // Get ISRC from Deezer title search if not cached
-                if isrc == nil {
-                    let results = await SongMetadata.searchDeezer(
-                        query: "\(track.artistLine) \(track.name)", limit: 3, index: 0
-                    )
-                    isrc = results.first?.isrc?.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-
-                if let isrc, !isrc.isEmpty {
-                    log("ByeTunes Spotify fallback: ISRC \(isrc) — fetching anon Spotify token")
-                    if let tokenURL = URL(string: "https://open.spotify.com/get_access_token?reason=transport&productType=web_player"),
-                       let (tokenData, _) = try? await URLSession.shared.data(from: tokenURL),
-                       let tokenJSON = try? JSONSerialization.jsonObject(with: tokenData) as? [String: Any],
-                       let accessToken = tokenJSON["accessToken"] as? String, !accessToken.isEmpty {
-                        var searchReq = URLRequest(url: URL(string: "https://api.spotify.com/v1/search?q=isrc%3A\(isrc)&type=track&limit=1")!)
-                        searchReq.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-                        if let (searchData, _) = try? await URLSession.shared.data(for: searchReq),
-                           let searchJSON = try? JSONSerialization.jsonObject(with: searchData) as? [String: Any],
-                           let tracks = searchJSON["tracks"] as? [String: Any],
-                           let items = tracks["items"] as? [[String: Any]],
-                           let firstTrack = items.first,
-                           let trackID = firstTrack["id"] as? String, !trackID.isEmpty {
-                            spotifyURL = "https://open.spotify.com/track/\(trackID)"
-                            log("ByeTunes Spotify fallback: anon Spotify token found track: \(spotifyURL!)")
-                        }
-                    }
-                }
-            }
-
-            // Path 3: song.link with Apple Music URL → Spotify (last resort)
             if spotifyURL == nil,
                let mapped = try? await fetchMappedURL(for: mappingSeedURL(for: source.url), platform: .spotify) {
                 spotifyURL = mapped
                 log("ByeTunes Spotify fallback: song.link AM→Spotify: \(mapped)")
+            }
+
+            if spotifyURL == nil,
+               let deezerMapped = try? await fetchMappedURL(for: mappingSeedURL(for: source.url), platform: .deezer),
+               let mapped = try? await fetchMappedURL(for: deezerMapped, platform: .spotify) {
+                spotifyURL = mapped
+                log("ByeTunes Spotify fallback: song.link AM→Deezer→Spotify: \(mapped)")
             }
 
             if let spotifyURL {
@@ -4399,6 +4804,7 @@ final class DownloadViewModel: ObservableObject {
             return try await executeDownloadRequest(
                 URLRequest(url: immediateURL),
                 trackID: sourceURL,
+                backendLabel: "Apple Music API",
                 suggestedName: suggestedName,
                 fallbackExtension: "m4a"
             )
@@ -4422,6 +4828,7 @@ final class DownloadViewModel: ObservableObject {
                 return try await executeDownloadRequest(
                     URLRequest(url: resolvedURL),
                     trackID: sourceURL,
+                    backendLabel: "Apple Music API",
                     suggestedName: suggestedName,
                     fallbackExtension: "m4a"
                 )
@@ -4446,6 +4853,7 @@ final class DownloadViewModel: ObservableObject {
         return try await executeDownloadRequest(
             fileRequest,
             trackID: sourceURL,
+            backendLabel: "Apple Music API",
             suggestedName: suggestedName,
             fallbackExtension: "m4a"
         )
@@ -4502,8 +4910,7 @@ final class DownloadViewModel: ObservableObject {
 
         let downloadRequest = URLRequest(url: downloadURL)
         let (encryptedData, response) = try await fetchDataWithProgress(for: downloadRequest) { [weak self] progress, speedBps in
-            self?.currentSongProgress = progress
-            self?.currentDownloadSpeedBps = speedBps
+            self?.updateVisibleDownloadProgress(progress, speedBps: speedBps)
         }
         try validateHTTP(response: response, data: encryptedData)
 
@@ -4781,36 +5188,6 @@ final class DownloadViewModel: ObservableObject {
         return outData
     }
 
-    private func yoinkifyCompatibleSource(for track: DownloadTrack) async -> DownloadSourceChoice? {
-        let query = "\(track.artistLine) \(track.name)"
-        let candidates = await AppleMusicAPI.shared.searchSongs(query: query, limit: 10, offset: 0)
-        if !candidates.isEmpty {
-            let ranked = candidates
-                .map { candidate in
-                    (candidate, scoreAppleMusicCandidate(candidate, for: track))
-                }
-                .sorted {
-                    if $0.1 == $1.1 {
-                        return $0.0.id < $1.0.id
-                    }
-                    return $0.1 > $1.1
-                }
-
-            if let best = ranked.first, best.1 >= 120 {
-                let region = UserDefaults.standard.string(forKey: "storeRegion")?.lowercased() ?? "us"
-                let url = best.0.attributes.url ?? "https://music.apple.com/\(region)/song/\(best.0.id)"
-                return DownloadSourceChoice(platform: .appleMusic, url: url, backendGenreSource: DownloadPlatform.appleMusic.backendGenreSource)
-            }
-        }
-
-        if let fallback = await bestMetadataFallback(for: track), let source = fallback.source {
-            log("Using \(fallback.providerName) metadata fallback for Yoinkify remap: \(fallback.artist) - \(fallback.title)")
-            return source
-        }
-
-        return nil
-    }
-
     private func scoreAppleMusicCandidate(_ candidate: AppleMusicAPI.AppleMusicSong, for track: DownloadTrack) -> Int {
         let trackTitle = DownloadSupport.normalizedSearchValue(track.name)
         let trackAlbum = DownloadSupport.normalizedSearchValue(track.albumName)
@@ -5056,9 +5433,6 @@ final class DownloadViewModel: ObservableObject {
     }
 
     private func yoinkifyFormat(for serverPreference: DownloaderServerPreference) -> String {
-        // Always respect the user's explicit "Output Format" setting.
-        // The autoDownloadTier quality profile path was bypassing the user's choice
-        // because downloadWithFallbacks always passes .auto as the server preference.
         return UserDefaults.standard.string(forKey: "yoinkifyFormat") ?? "flac"
     }
 
@@ -5119,137 +5493,6 @@ final class DownloadViewModel: ObservableObject {
         guard remainingBits > 0 else { return true }
         let mask = UInt8(0xFF << (8 - remainingBits))
         return (bytes[fullBytes] & mask) == 0
-    }
-
-    private func resolveTidalFallbackTrackIDs(for track: DownloadTrack) async -> [String] {
-        var orderedTrackIDs: [String] = []
-        var seenTrackIDs = Set<String>()
-
-        func appendTrackID(_ trackID: String, reason: String) {
-            guard !trackID.isEmpty, seenTrackIDs.insert(trackID).inserted else { return }
-            orderedTrackIDs.append(trackID)
-            log("Queued Tidal fallback candidate \(trackID) via \(reason)")
-        }
-
-        do {
-            let mappedURL = try await fetchMappedURL(for: mappingSeedURL(for: track.sourceURL), platform: .tidal)
-            log("Mapped Tidal URL: \(mappedURL)")
-            if let mappedTrackID = DownloadSupport.tidalTrackID(from: mappedURL) {
-                appendTrackID(mappedTrackID, reason: "Song.link")
-            } else {
-                log("Song.link returned a Tidal URL, but no track ID could be extracted.")
-            }
-        } catch {
-            log("Song.link mapping failed for \(track.name): \(error.localizedDescription)")
-        }
-
-        let appleSong = await AppleMusicAPI.shared.fetchSong(id: track.id)
-        let metadataFallback = appleSong == nil ? await bestMetadataFallback(for: track) : nil
-        let searchQueries = buildTidalSearchQueries(for: track, appleSong: appleSong, metadataFallback: metadataFallback)
-
-        if let appleSong {
-            let traits = appleSong.attributes.audioTraits?.joined(separator: ", ") ?? "none"
-            log("Matching from Apple metadata: isrc=\(appleSong.attributes.isrc ?? "none"), album=\(appleSong.attributes.albumName ?? "unknown"), traits=\(traits)")
-        } else if let metadataFallback {
-            log("Matching from \(metadataFallback.providerName) metadata fallback: album=\(metadataFallback.album ?? "unknown")")
-        } else {
-            log("Direct Apple metadata fetch unavailable for \(track.id). Falling back to visible search metadata only.")
-        }
-
-        for query in searchQueries {
-            let matchedTrackIDs = await searchTidalCandidateTrackIDs(
-                for: track,
-                query: query,
-                excluding: seenTrackIDs
-            )
-            for matchedTrackID in matchedTrackIDs {
-                appendTrackID(matchedTrackID, reason: "query '\(query)'")
-            }
-        }
-
-        return orderedTrackIDs
-    }
-
-    private func resolveQobuzFallbackTrackIDs(for track: DownloadTrack) async -> [String] {
-        var orderedTrackIDs: [String] = []
-        var seenTrackIDs = Set<String>()
-
-        func appendTrackID(_ trackID: String, reason: String) {
-            guard !trackID.isEmpty, seenTrackIDs.insert(trackID).inserted else { return }
-            orderedTrackIDs.append(trackID)
-            log("Queued Qobuz fallback candidate \(trackID) via \(reason)")
-        }
-
-        do {
-            let mappedURL = try await fetchMappedURL(for: mappingSeedURL(for: track.sourceURL), platform: .qobuz)
-            log("Mapped Qobuz URL: \(mappedURL)")
-            if let mappedTrackID = DownloadSupport.qobuzTrackID(from: mappedURL) {
-                appendTrackID(mappedTrackID, reason: "Song.link")
-                return orderedTrackIDs
-            } else {
-                log("Song.link returned a Qobuz URL, but no track ID could be extracted.")
-            }
-        } catch {
-            log("Song.link Qobuz mapping failed for \(track.name): \(error.localizedDescription)")
-        }
-
-        let appleSong = await AppleMusicAPI.shared.fetchSong(id: track.id)
-        let metadataFallback = appleSong == nil ? await bestMetadataFallback(for: track) : nil
-        let searchQueries = buildTidalSearchQueries(for: track, appleSong: appleSong, metadataFallback: metadataFallback)
-
-        if let appleSong {
-            let traits = appleSong.attributes.audioTraits?.joined(separator: ", ") ?? "none"
-            log("Matching from Apple metadata for Qobuz: isrc=\(appleSong.attributes.isrc ?? "none"), album=\(appleSong.attributes.albumName ?? "unknown"), traits=\(traits)")
-        } else if let metadataFallback {
-            log("Matching from \(metadataFallback.providerName) metadata fallback for Qobuz: album=\(metadataFallback.album ?? "unknown")")
-        } else {
-            log("Direct Apple metadata fetch unavailable for \(track.id). Falling back to visible search metadata only for Qobuz.")
-        }
-
-        let exactISRC = appleSong?.attributes.isrc?.trimmingCharacters(in: .whitespacesAndNewlines)
-        for query in searchQueries {
-            let outcome = await searchQobuzCandidateTrackIDs(
-                for: track,
-                query: query,
-                excluding: seenTrackIDs
-            )
-            for matchedTrackID in outcome.trackIDs {
-                appendTrackID(matchedTrackID, reason: "query '\(query)'")
-            }
-
-            if let exactISRC,
-               !exactISRC.isEmpty,
-               query.compare(exactISRC, options: .caseInsensitive) == .orderedSame,
-               !outcome.trackIDs.isEmpty {
-                log("Qobuz ISRC search produced a usable match. Stopping early.")
-                return orderedTrackIDs
-            }
-
-            if outcome.bestScore >= 230, !outcome.trackIDs.isEmpty {
-                log("Qobuz found a strong exact match for '\(query)'. Stopping early.")
-                return orderedTrackIDs
-            }
-        }
-
-        return orderedTrackIDs
-    }
-
-    private func qobuzCandidates(trackID: String) async throws -> [BackendCandidate] {
-        let quality = qobuzQuality(for: DownloaderServerPreference(rawValue: UserDefaults.standard.string(forKey: "downloadServer") ?? "") ?? .auto)
-        let payload = try makeQobuzDownloadPayload(trackID: trackID, quality: quality)
-        return QobuzAPIRegistry.downloadProviders.compactMap { provider in
-            guard let url = URL(string: provider.url) else { return nil }
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = payload
-            return BackendCandidate(
-                label: provider.label,
-                request: request,
-                tidalAPIBaseURL: nil,
-                customDownload: nil
-            )
-        }
     }
 
     private func makeQobuzDownloadPayload(trackID: String, quality: String) throws -> Data {
@@ -5450,6 +5693,7 @@ final class DownloadViewModel: ObservableObject {
                     fileURL = try await executeDownloadRequest(
                         request,
                         trackID: trackID,
+                        backendLabel: candidate.label,
                         suggestedName: suggestedName,
                         fallbackExtension: fallbackExtension
                     )
@@ -5475,6 +5719,7 @@ final class DownloadViewModel: ObservableObject {
     private func executeDownloadRequest(
         _ request: URLRequest,
         trackID: String,
+        backendLabel: String,
         suggestedName: String,
         fallbackExtension: String,
         depth: Int = 0
@@ -5487,9 +5732,39 @@ final class DownloadViewModel: ObservableObject {
         applyZarzHeaders(to: &request)
         log("Requesting \(redactedDownloadURLString(request.url))")
 
-        let (data, response) = try await fetchDataWithProgress(for: request) { [weak self] progress, speedBps in
-            self?.currentSongProgress = progress
-            self?.currentDownloadSpeedBps = speedBps
+        let shouldUseBackgroundTransfer = backgroundDownloadsEnabled
+        log("executeDownloadRequest track=\(trackID) backend=\(backendLabel) depth=\(depth) method=\(request.httpMethod ?? "GET") background=\(shouldUseBackgroundTransfer)")
+        let data: Data
+        let response: URLResponse
+        let backgroundFileURL: URL?
+        if shouldUseBackgroundTransfer {
+            let backgroundResult = try await BackgroundAudioDownloadManager.shared.download(
+                request: request,
+                context: BackgroundDownloadRequestContext(
+                    trackID: trackID,
+                    backendLabel: backendLabel,
+                    suggestedName: suggestedName,
+                    fallbackExtension: fallbackExtension,
+                    trackName: knownTracksByID[trackID]?.name,
+                    artistName: knownTracksByID[trackID]?.artistLine,
+                    queueText: queueCounterText
+                ),
+                progress: { [weak self] progress, speedBps in
+                    self?.updateVisibleDownloadProgress(progress, speedBps: speedBps)
+                }
+            )
+            backgroundFileURL = backgroundResult.fileURL
+            data = try await Task.detached(priority: .utility) {
+                try Data(contentsOf: backgroundResult.fileURL, options: .mappedIfSafe)
+            }.value
+            response = backgroundResult.response
+        } else {
+            let fetched = try await fetchDataWithProgress(for: request) { [weak self] progress, speedBps in
+                self?.updateVisibleDownloadProgress(progress, speedBps: speedBps)
+            }
+            backgroundFileURL = nil
+            data = fetched.0
+            response = fetched.1
         }
         try validateHTTP(response: response, data: data)
 
@@ -5499,6 +5774,7 @@ final class DownloadViewModel: ObservableObject {
             return try await executeDownloadRequest(
                 redirectedRequest,
                 trackID: trackID,
+                backendLabel: backendLabel,
                 suggestedName: suggestedName,
                 fallbackExtension: fallbackExtension,
                 depth: depth + 1
@@ -5511,6 +5787,7 @@ final class DownloadViewModel: ObservableObject {
             return try await executeDownloadRequest(
                 redirectedRequest,
                 trackID: trackID,
+                backendLabel: backendLabel,
                 suggestedName: suggestedName,
                 fallbackExtension: fallbackExtension,
                 depth: depth + 1
@@ -5527,6 +5804,10 @@ final class DownloadViewModel: ObservableObject {
         if let mimeType, mimeType.contains("application/json"), extractRedirectURL(from: data) == nil {
             let bodyText = String(data: data, encoding: .utf8) ?? "<non-utf8 json>"
             throw DownloadError.remoteFailure(bodyText)
+        }
+
+        if let backgroundFileURL {
+            return backgroundFileURL
         }
 
         let fileExtension = DownloadSupport.fileExtension(for: mimeType, fallback: fallbackExtension)
@@ -6334,55 +6615,6 @@ final class DownloadViewModel: ObservableObject {
         return mapTidalSearchItemsToTracks(rankedCandidates)
     }
 
-    private func buildTidalArtists(from items: [TidalSearchItem], query: String) -> [DownloadArtist] {
-        let normalizedQuery = DownloadSupport.normalizedSearchValue(query)
-        var bestArtistsByKey: [String: (artist: DownloadArtist, score: Int)] = [:]
-
-        for candidate in items {
-            let artists = candidate.artists ?? [candidate.artist].compactMap { $0 }
-            for artist in artists {
-                let normalizedName = DownloadSupport.normalizedSearchValue(artist.name)
-                guard !normalizedName.isEmpty else { continue }
-
-                let score: Int
-                if normalizedName == normalizedQuery {
-                    score = 220
-                } else if normalizedName.contains(normalizedQuery) || normalizedQuery.contains(normalizedName) {
-                    score = 150
-                } else if normalizedQuery.split(separator: " ").allSatisfy({ token in
-                    normalizedName.contains(String(token))
-                }) {
-                    score = 110
-                } else {
-                    continue
-                }
-
-                let artistID = artist.id.map(String.init) ?? "tidal:\(normalizedName)"
-                let entry = DownloadArtist(
-                    id: artistID,
-                    name: artist.name,
-                    provider: .tidal,
-                    artworkURL: tidalImageURL(for: artist.picture)
-                )
-
-                if let existing = bestArtistsByKey[artistID], existing.score >= score {
-                    continue
-                }
-                bestArtistsByKey[artistID] = (entry, score)
-            }
-        }
-
-        return bestArtistsByKey.values
-            .sorted {
-                if $0.score == $1.score {
-                    return $0.artist.name.localizedCaseInsensitiveCompare($1.artist.name) == .orderedAscending
-                }
-                return $0.score > $1.score
-            }
-            .prefix(8)
-            .map(\.artist)
-    }
-
     private func mapTidalSearchItemsToTracks(_ items: [TidalSearchItem]) -> [DownloadTrack] {
         items.map { item in
             DownloadTrack(
@@ -6584,42 +6816,6 @@ final class DownloadViewModel: ObservableObject {
             log("Tidal album fetch failed for \(albumID): \(error.localizedDescription)")
             return nil
         }
-    }
-
-    private func fetchTidalArtistAlbums(artistID: Int) async -> [DownloadAlbum] {
-        let hosts = await tidalBaseURLCandidates()
-        guard !hosts.isEmpty else { return [] }
-
-        for host in hosts {
-            guard var components = URLComponents(string: "\(host)/artist/") else { continue }
-            components.queryItems = [
-                URLQueryItem(name: "f", value: String(artistID)),
-                URLQueryItem(name: "skip_tracks", value: "true")
-            ]
-            guard let url = components.url else { continue }
-
-            do {
-                let (data, response) = try await session.data(for: URLRequest(url: url))
-                try validateHTTP(response: response, data: data)
-                let decoded = try JSONDecoder().decode(TidalArtistAlbumsResponse.self, from: data)
-                return decoded.albums.items.map { album in
-                    DownloadAlbum(
-                        id: String(album.id),
-                        name: album.title,
-                        artistLine: album.artist?.name ?? decoded.artist?.name ?? "Unknown Artist",
-                        artworkURL: tidalImageURL(for: album.cover),
-                        sourceURL: album.url ?? "https://tidal.com/browse/album/\(album.id)",
-                        provider: .tidal,
-                        artistIdentifier: String(artistID),
-                        albumIdentifier: String(album.id)
-                    )
-                }
-            } catch {
-                log("Tidal artist albums fetch failed for \(artistID) via \(host): \(error.localizedDescription)")
-            }
-        }
-
-        return []
     }
 
     private func fetchTidalArtist(id: String, sourceURL: String? = nil) async -> DownloadArtist? {
@@ -6988,7 +7184,7 @@ final class DownloadViewModel: ObservableObject {
     private func fetchSpotifyAlbumFromPublicPage(sourceURL: String, fallbackID: String) async -> (DownloadAlbum, [DownloadTrack])? {
         if let embedURL = URL(string: "https://open.spotify.com/embed/album/\(fallbackID)") {
             do {
-                let (data, response) = try await session.data(from: embedURL)
+                let (data, _) = try await session.data(from: embedURL)
                 if let html = String(data: data, encoding: .utf8), !html.isEmpty,
                    let parsed = parseSpotifyEmbedHTML(in: html, fallbackID: fallbackID, sourceURL: sourceURL, sourceContext: .album) {
                     return parsed
@@ -7095,7 +7291,7 @@ final class DownloadViewModel: ObservableObject {
     private func fetchSpotifyPlaylistFromPublicPage(sourceURL: String, fallbackID: String) async -> (DownloadAlbum, [DownloadTrack])? {
         if let embedURL = URL(string: "https://open.spotify.com/embed/playlist/\(fallbackID)") {
             do {
-                let (data, response) = try await session.data(from: embedURL)
+                let (data, _) = try await session.data(from: embedURL)
                 if let html = String(data: data, encoding: .utf8), !html.isEmpty,
                    let parsed = parseSpotifyEmbedHTML(in: html, fallbackID: fallbackID, sourceURL: sourceURL, sourceContext: .song) {
                     var enrichedAlbum = parsed.album
@@ -7491,16 +7687,13 @@ final class DownloadViewModel: ObservableObject {
         guard segments.count > 1 else { return [] }
         
         for segment in segments.dropFirst() {
-            // Extract track ID
             guard let trackID = firstRegexCapture(in: segment, pattern: #"href=["']/track/([a-zA-Z0-9]+)["']"#, group: 1) else {
                 continue
             }
-            // Extract track title
             guard let title = firstRegexCapture(in: segment, pattern: #"<span[^>]*>([^<]+)</span>"#, group: 1) else {
                 continue
             }
-            
-            // Extract artists: find all href="/artist/[a-zA-Z0-9]+" links and get their content
+
             let artistPattern = #"href=["']/artist/[a-zA-Z0-9]+["'][^>]*>([^<]+)</a>"#
             let artistNames = regexMatches(in: segment, pattern: artistPattern, group: 1)
             let artistLine = artistNames.joined(separator: ", ")
@@ -7656,6 +7849,142 @@ final class DownloadViewModel: ObservableObject {
         Logger.shared.log("[Download] \(message)")
     }
 
+    static let appleMusicUnavailableMessage = "Unable to download using Apple Music. Please paste the Spotify URL."
+
+    private func downloadFailureMessage(for track: DownloadTrack, error: Error) -> String {
+        guard track.provider == .appleMusic else {
+            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+        return Self.appleMusicUnavailableMessage
+    }
+
+    private func updateLiveActivity(
+        trackName: String,
+        artistName: String,
+        progress: Double,
+        queueText: String,
+        speedBps: Double,
+        phase: DownloadLiveActivityAttributes.Phase
+    ) {
+        guard backgroundDownloadsEnabled else { return }
+        DownloadLiveActivityManager.shared.update(
+            trackName: trackName,
+            artistName: artistName,
+            progress: progress,
+            queueText: queueText,
+            speedBps: speedBps,
+            phase: phase
+        )
+    }
+
+    private func endLiveActivity(
+        trackName: String,
+        artistName: String,
+        queueText: String,
+        phase: DownloadLiveActivityAttributes.Phase
+    ) {
+        guard backgroundDownloadsEnabled else { return }
+        DownloadLiveActivityManager.shared.end(
+            trackName: trackName,
+            artistName: artistName,
+            queueText: queueText,
+            phase: phase
+        )
+    }
+
+    private func clearLiveActivity() {
+        guard backgroundDownloadsEnabled else { return }
+        DownloadLiveActivityManager.shared.clear()
+    }
+
+    private func hasHandedOffDownloadedFile(trackID: String) -> Bool {
+        QueuePersistenceStore.loadPendingDownloadedImports().contains { item in
+            item.trackID == trackID
+        }
+    }
+
+    private func handOffDownloadedFileForMainImport(_ fileURL: URL, trackID: String) {
+        var pending = QueuePersistenceStore.loadPendingDownloadedImports()
+        if !pending.contains(where: { $0.localURLPath == fileURL.path || $0.trackID == trackID }) {
+            pending.append(.init(localURLPath: fileURL.path, trackID: trackID))
+            QueuePersistenceStore.savePendingDownloadedImports(pending)
+            NotificationCenter.default.post(name: .importDownloadedSongs, object: [fileURL])
+            BackgroundMetadataFetchManager.shared.processPendingDownloadsInBackground()
+        } else {
+            log("Download handoff already exists for track \(trackID); skipping notification.")
+        }
+    }
+
+    private func updateVisibleDownloadProgress(_ progress: Double, speedBps: Double) {
+        currentSongProgress = progress
+        currentDownloadSpeedBps = speedBps
+
+        guard let activeID = activeDownloadTrackID, let track = knownTracksByID[activeID] else { return }
+        updateLiveActivity(
+            trackName: track.name,
+            artistName: track.artistLine,
+            progress: progress,
+            queueText: queueCounterText,
+            speedBps: speedBps,
+            phase: isPaused ? .paused : .downloading
+        )
+    }
+
+    private func restoreDeferredEnrichments() {
+        let restored = QueuePersistenceStore.loadDeferredDownloadEnrichments().compactMap { item -> DeferredDownloadEnrichment? in
+            guard let track = item.track.downloadTrack else { return nil }
+            let url = URL(fileURLWithPath: item.localURLPath)
+            guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+            return DeferredDownloadEnrichment(localURL: url, track: track)
+        }
+        deferredEnrichments = restored
+        if !restored.isEmpty {
+            log("Restored \(restored.count) deferred enrichment item(s).")
+        }
+        syncDeferredEnrichmentPersistence()
+    }
+
+    private func syncDeferredEnrichmentPersistence() {
+        let persisted = deferredEnrichments.map {
+            PersistedDeferredDownloadEnrichment(
+                localURLPath: $0.localURL.path,
+                track: PersistedDownloadTrack(track: $0.track)
+            )
+        }
+        QueuePersistenceStore.saveDeferredDownloadEnrichments(persisted)
+    }
+
+    func processDeferredEnrichmentIfNeeded() async {
+        guard !isProcessingDeferredEnrichments else { return }
+        guard !deferredEnrichments.isEmpty else { return }
+
+        isProcessingDeferredEnrichments = true
+        log("Starting deferred enrichment pass for \(deferredEnrichments.count) item(s).")
+        defer {
+            isProcessingDeferredEnrichments = false
+            syncDeferredEnrichmentPersistence()
+            log("Deferred enrichment pass ended. remaining=\(deferredEnrichments.count)")
+        }
+
+        var remaining: [DeferredDownloadEnrichment] = []
+
+        for item in deferredEnrichments {
+            do {
+                log("Deferred enrichment processing \(item.track.id) from \(item.localURL.lastPathComponent)")
+                var song = try await SongMetadata.fromURL(item.localURL)
+                let enriched = await enrichDownloadedSong(song, sourceTrack: item.track)
+                song = persistDownloadedSongIfNeeded(enriched)
+                enrichedSongs.append(song)
+                log("Deferred metadata enrichment finished for \(song.title).")
+            } catch {
+                log("Deferred metadata enrichment failed for \(item.localURL.lastPathComponent): \(error.localizedDescription)")
+                remaining.append(item)
+            }
+        }
+
+        deferredEnrichments = remaining
+    }
+
     private func restorePersistedQueue() {
         guard let snapshot = QueuePersistenceStore.loadDownloadQueue() else { return }
 
@@ -7669,25 +7998,31 @@ final class DownloadViewModel: ObservableObject {
         queueOrder = snapshot.queueOrder.filter { restoredTracks[$0] != nil }
         totalQueueCount = snapshot.totalQueueCount
         completedQueueCount = snapshot.completedQueueCount
+        restoredActiveTrackID = snapshot.activeID.flatMap { restoredTracks[$0] != nil ? $0 : nil }
 
         for id in snapshot.failedIDs where restoredTracks[id] != nil {
             trackStates[id] = .failed
+            trackFailureReasons[id] = snapshot.failureReasons?[id]
         }
 
-        let activeAsQueued = snapshot.activeID.map { [$0] } ?? []
-        let pendingIDs = (activeAsQueued + snapshot.pendingIDs).filter { restoredTracks[$0] != nil }
+        let pendingIDs = snapshot.pendingIDs.filter { restoredTracks[$0] != nil }
         pendingQueue = pendingIDs.compactMap { id in
             trackStates[id] = .queued
             return restoredTracks[id]
         }
 
-        if totalQueueCount == 0 && (!pendingQueue.isEmpty || !snapshot.failedIDs.isEmpty) {
-            totalQueueCount = pendingQueue.count + snapshot.failedIDs.count
+        if totalQueueCount == 0 && (!pendingQueue.isEmpty || restoredActiveTrackID != nil || !snapshot.failedIDs.isEmpty) {
+            totalQueueCount = pendingQueue.count + snapshot.failedIDs.count + (restoredActiveTrackID == nil ? 0 : 1)
         }
         completedQueueCount = min(completedQueueCount, totalQueueCount)
 
-        if !pendingQueue.isEmpty {
+        if restoredActiveTrackID != nil {
+            log("Found an active download to recover from the last session.")
+        } else if !pendingQueue.isEmpty {
             log("Restored \(pendingQueue.count) queued download(s) from last session.")
+            if backgroundDownloadsEnabled {
+                primeBackgroundPreparation()
+            }
             Task { await processQueueIfNeeded() }
         } else if !snapshot.failedIDs.isEmpty {
             log("Restored \(snapshot.failedIDs.count) failed download(s) from last session.")
@@ -7711,7 +8046,8 @@ final class DownloadViewModel: ObservableObject {
             failedIDs: failedIDs,
             activeID: activeDownloadTrackID,
             totalQueueCount: totalQueueCount,
-            completedQueueCount: completedQueueCount
+            completedQueueCount: completedQueueCount,
+            failureReasons: trackFailureReasons.filter { failedIDs.contains($0.key) }
         )
         QueuePersistenceStore.saveDownloadQueue(snapshot)
     }
@@ -7732,7 +8068,8 @@ final class DownloadViewModel: ObservableObject {
                     album: track.albumName,
                     state: state,
                     isActive: activeDownloadTrackID == id,
-                    queueIndex: queueIndex
+                    queueIndex: queueIndex,
+                    failureReason: state == .failed ? trackFailureReasons[id] : nil
                 )
             )
         }
@@ -7764,6 +8101,7 @@ struct DownloadQueueSnapshot {
         let state: DownloadTrackState
         let isActive: Bool
         let queueIndex: Int?
+        let failureReason: String?
     }
 
     let activeItems: [Item]
@@ -7778,6 +8116,39 @@ struct DownloadQueueSnapshot {
 struct DownloadQueueDetailsSheet: View {
     @ObservedObject var vm: DownloadViewModel
     @Environment(\.dismiss) private var dismiss
+    @State private var spotifySearchItem: DownloadQueueSnapshot.Item?
+    @State private var copiedItemID: String?
+    @State private var showCopiedBanner = false
+
+    private func spotifySearchQuery(for item: DownloadQueueSnapshot.Item) -> String {
+        let strippedFeaturing = item.name.replacingOccurrences(
+            of: #"\s*[\(\[](?:feat(?:\.|uring)?|ft\.?)\b[^\)\]]*[\)\]]"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
+        let query = strippedFeaturing
+            .trimmingCharacters(in: .whitespaces)
+            .folding(options: .diacriticInsensitive, locale: nil)
+            .lowercased()
+        return query.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? query
+    }
+
+    private func spotifySearchURL(for item: DownloadQueueSnapshot.Item) -> URL {
+        let encoded = spotifySearchQuery(for: item)
+        return URL(string: "https://open.spotify.com/search/\(encoded)") ?? URL(string: "https://open.spotify.com")!
+    }
+
+    private func findOnSpotify(_ item: DownloadQueueSnapshot.Item) {
+        UIPasteboard.general.string = "\(item.artist) \(item.name)"
+        copiedItemID = item.id
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            if copiedItemID == item.id {
+                copiedItemID = nil
+            }
+        }
+        spotifySearchItem = item
+    }
 
     var body: some View {
         let snapshot = vm.queueSnapshot()
@@ -7942,6 +8313,39 @@ struct DownloadQueueDetailsSheet: View {
                 }
             }
         }
+        .sheet(item: $spotifySearchItem) { item in
+            ZStack(alignment: .bottom) {
+                SafariSheetView(url: spotifySearchURL(for: item))
+                    .ignoresSafeArea()
+
+                if showCopiedBanner {
+                    HStack(spacing: 10) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("Copied. Paste it in the search bar.")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundColor(.primary)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(.thinMaterial)
+                    .clipShape(Capsule())
+                    .shadow(color: Color.black.opacity(0.15), radius: 10, x: 0, y: 5)
+                    .padding(.bottom, 30)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .onAppear {
+                withAnimation(.spring()) {
+                    showCopiedBanner = true
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                    withAnimation(.easeOut) {
+                        showCopiedBanner = false
+                    }
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -7980,6 +8384,29 @@ struct DownloadQueueDetailsSheet: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                if let failureReason = item.failureReason {
+                    Text(failureReason)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                        .padding(.top, 1)
+
+                    if failureReason == DownloadViewModel.appleMusicUnavailableMessage {
+                        Button {
+                            findOnSpotify(item)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: copiedItemID == item.id ? "checkmark" : "magnifyingglass")
+                                    .font(.caption2)
+                                Text(copiedItemID == item.id ? "Copied, opening Spotify search…" : "Find on Spotify")
+                                    .font(.caption2.weight(.semibold))
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.accentColor)
+                        .padding(.top, 2)
+                    }
+                }
             }
 
             Spacer()
@@ -8001,6 +8428,16 @@ struct DownloadQueueDetailsSheet: View {
         }
         return String(format: "%.2f MB/s", kb / 1024)
     }
+}
+
+struct SafariSheetView: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> SFSafariViewController {
+        SFSafariViewController(url: url)
+    }
+
+    func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
 }
 
 private final class ProgressiveDataFetcher: NSObject, URLSessionDataDelegate {
@@ -8124,11 +8561,6 @@ private final class ProgressiveDataFetcher: NSObject, URLSessionDataDelegate {
     }
 }
 
-private struct AppleMusicAlbumSearchResponse: Decodable {
-    let results: AppleMusicAlbumSearchResults?
-    let errors: [AppleMusicAlbumSearchError]?
-}
-
 private struct AppleMusicAlbumSearchResults: Decodable {
     let albums: AppleMusicAlbumPage?
 }
@@ -8156,21 +8588,12 @@ private struct AppleMusicAlbumResultAttributes: Decodable {
     let artwork: AppleMusicAPI.AppleMusicArtwork?
 }
 
-private struct AppleMusicPlaylistSearchResponse: Decodable {
-    let results: AppleMusicPlaylistSearchResults?
-    let errors: [AppleMusicAlbumSearchError]?
-}
-
 private struct AppleMusicPlaylistSearchResults: Decodable {
     let playlists: AppleMusicPlaylistPage?
 }
 
 private struct AppleMusicPlaylistPage: Decodable {
     let data: [AppleMusicPlaylistResult]
-}
-
-private struct AppleMusicAlbumDetailsResponse: Decodable {
-    let data: [AppleMusicAlbumDetailsData]
 }
 
 private struct AppleMusicAlbumDetailsData: Decodable {
@@ -8212,10 +8635,6 @@ private struct AppleMusicAlbumTrackAttributes: Decodable {
     let artwork: AppleMusicAPI.AppleMusicArtwork?
 }
 
-private struct AppleMusicArtistResponse: Decodable {
-    let data: [AppleMusicArtistResult]
-}
-
 private struct AppleMusicArtistResult: Decodable {
     let id: String
     let attributes: AppleMusicArtistAttributes
@@ -8224,10 +8643,6 @@ private struct AppleMusicArtistResult: Decodable {
 private struct AppleMusicArtistAttributes: Decodable {
     let name: String
     let artwork: AppleMusicAPI.AppleMusicArtwork?
-}
-
-private struct AppleMusicPlaylistResponse: Decodable {
-    let data: [AppleMusicPlaylistResult]
 }
 
 private struct AppleMusicPlaylistResult: Decodable {

@@ -1,7 +1,6 @@
 import SwiftUI
 
 // MARK: - Tutorial Overlay
-
 struct TutorialOverlayView: View {
 
     @Binding var isComplete: Bool
@@ -59,7 +58,6 @@ struct TutorialOverlayView: View {
                 )
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .onChange(of: songs.count, perform: { count in
-                    // Injection removes songs from the queue — auto-dismiss so the toast is visible
                     if count == 0 {
                         finish()
                     }
@@ -71,7 +69,6 @@ struct TutorialOverlayView: View {
     }
 
     // MARK: - Metadata Choice
-
     @ViewBuilder
     private var metadataScreen: some View {
         ZStack {
@@ -79,7 +76,6 @@ struct TutorialOverlayView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Header
                 VStack(spacing: 8) {
                     ZStack {
                         Circle()
@@ -102,7 +98,6 @@ struct TutorialOverlayView: View {
                 .padding(.top, 28)
                 .padding(.horizontal, 24)
 
-                // Cards
                 VStack(spacing: 12) {
                     metadataOptionCard(
                         icon: "sparkles",
@@ -165,7 +160,6 @@ struct TutorialOverlayView: View {
     ) -> some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 14) {
-                // Header row
                 HStack(spacing: 12) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 12)
@@ -198,7 +192,6 @@ struct TutorialOverlayView: View {
                         .foregroundColor(Color(.systemGray3))
                 }
 
-                // Feature list
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(points, id: \.self) { point in
                         HStack(spacing: 10) {
@@ -221,7 +214,6 @@ struct TutorialOverlayView: View {
     }
 
     // MARK: - Hint Sheet
-
     @ViewBuilder
     private func hintSheet(
         progress: Int,
@@ -236,7 +228,6 @@ struct TutorialOverlayView: View {
             Spacer().allowsHitTesting(false)
 
             VStack(spacing: 0) {
-                // Handle
                 Capsule()
                     .fill(Color(.systemGray4))
                     .frame(width: 36, height: 4)
@@ -244,7 +235,6 @@ struct TutorialOverlayView: View {
                     .padding(.bottom, 20)
 
                 VStack(spacing: 18) {
-                    // Progress dots + skip
                     HStack {
                         HStack(spacing: 6) {
                             ForEach(0..<2) { i in
@@ -260,7 +250,6 @@ struct TutorialOverlayView: View {
                             .foregroundColor(.secondary)
                     }
 
-                    // Icon + text
                     HStack(alignment: .top, spacing: 14) {
                         ZStack {
                             RoundedRectangle(cornerRadius: 14)
@@ -281,7 +270,6 @@ struct TutorialOverlayView: View {
                         }
                     }
 
-                    // Tab indicator + done button
                     HStack(spacing: 10) {
                         HStack(spacing: 7) {
                             Image(systemName: tabIcon)
@@ -331,7 +319,6 @@ struct TutorialOverlayView: View {
     }
 
     // MARK: - Helpers
-
     private func proceed() {
         withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
             step = .downloadHint
@@ -345,7 +332,6 @@ struct TutorialOverlayView: View {
 }
 
 // MARK: - Card Press Style
-
 private struct CardPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label

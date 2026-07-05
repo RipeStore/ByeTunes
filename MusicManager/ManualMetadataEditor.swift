@@ -15,7 +15,6 @@ struct ManualMetadataEditor: View {
     @State private var lyrics: String = ""
     @State private var isExplicit: Bool = false
 
-    // Custom album background color
     @State private var useCustomAlbumColor: Bool = false
     @State private var customAlbumColor: Color = .black
 
@@ -37,7 +36,6 @@ struct ManualMetadataEditor: View {
     }
 
     // MARK: - Color helpers
-
     private static func hexString(from color: Color) -> String {
         let uiColor = UIColor(color)
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
@@ -219,7 +217,6 @@ struct ManualMetadataEditor: View {
                             ColorPicker("Background Color", selection: $customAlbumColor, supportsOpacity: false)
                                 .labelsHidden()
                             Spacer()
-                            // live preview swatch
                             ZStack {
                                 RoundedRectangle(cornerRadius: 8)
                                     .fill(customAlbumColor)
@@ -334,7 +331,6 @@ struct ManualMetadataEditor: View {
         let uiColor = UIColor(color)
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         uiColor.getRed(&r, green: &g, blue: &b, alpha: &a)
-        // Relative luminance formula
         let luminance = 0.2126 * Double(r) + 0.7152 * Double(g) + 0.0722 * Double(b)
         return luminance > 0.62
     }
